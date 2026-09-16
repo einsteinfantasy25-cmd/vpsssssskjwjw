@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: titanbox
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    autoDeployTrigger: checksPass
+    maxShutdownDelaySeconds: 30
+    envVars:
+      - key: LOG_LEVEL
+        value: INFO
+      - key: ENABLE_TERMINAL
+        value: "false"
+      - key: ENABLE_RUNNER
+        value: "false"
+      - key: AUTO_REGISTER_WEBHOOKS
+        value: "false"
+      - key: BOTS_JSON
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: ADMIN_TOKEN
+        generateValue: true
+      - key: DEPLOY_ROOT
+        value: /workspace/titanbox-data
+      - key: DEPLOY_ADMIN_TELEGRAM_IDS
+        sync: false

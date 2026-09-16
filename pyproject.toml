@@ -1,0 +1,18 @@
+[project]
+name = "titanbox"
+version = "0.2.0"
+description = "Ultra-light PaaS runtime and multi-bot hub for Telegram workloads"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]

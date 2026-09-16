@@ -1,0 +1,13 @@
+services:
+  titanbox:
+    build: .
+    ports:
+      - "10000:10000"
+    env_file:
+      - .env
+    restart: unless-stopped
+    read_only: false
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
