@@ -5,7 +5,6 @@ services:
     plan: free
     healthCheckPath: /healthz
     autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
     envVars:
       - key: LOG_LEVEL
         value: INFO
