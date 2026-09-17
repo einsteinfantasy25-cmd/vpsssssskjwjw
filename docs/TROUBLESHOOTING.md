@@ -1,41 +1,37 @@
-# TitanBox v0.4 troubleshooting
+# TitanBox v1 troubleshooting
 
 ## `/start` لا يرد
 
-Open `/status`. If `loaded_bots=0`, inspect the hidden details in Render logs. A common error is missing `DEPLOY_BOT_TOKEN`. If the bot is loaded but not ready, use `/diag` once Telegram replies and compare expected/actual webhook.
+`/status`: إذا `loaded_bots=0`, راجع Render Logs و`DEPLOY_BOT_TOKEN`. إذا loaded لكن مو ready، قارن Webhook من `/diag`.
 
-## `/status` لا يعرض تفاصيل البوت
+## `/readyz` = 503 لكن `/healthz` = 200
 
-Expected. v0.4 hides public bot details by default. Use Telegram `/diag`, `/security`, Render logs, or temporarily set `PUBLIC_STATUS_DETAILS=true` only when you understand the exposure.
+هذا ممكن ومقصود. افتح `/readyz` وشوف reasons ثم `/infra`. إذا S3/DB معلنة Required وفاشلة، TitanBox يبقى حي للتشخيص لكنه يقول إنه غير Ready.
 
-## أمر حساس يقول `/auth 123456`
+## S3 مفعلة وDeployment يرفض
 
-2FA is enabled. Enter the current code from your authenticator with `/auth CODE`, then repeat the command. `/lock` closes the session immediately.
+إذا storage required، هذا Fail-closed. استخدم `/infra`; صحح endpoint/bucket/keys/permissions. لا تجعل `DURABILITY_REQUIRED=false` فقط حتى يمر Deploy إلا إذا تقبل صراحة فقدان الـbackup.
 
-## `/security` يقول Audit غير متاحة/غير سليمة
+## Backup موجود لكن `/restore` يرفض signature
 
-Check `AUDIT_HMAC_KEY`, local write permissions, and Render logs. On Render Free the local audit file is ephemeral; platform logs are the secondary copy. For durable audit history, export logs/storage externally.
+لا تتجاوز الفحص. إما metadata/marker تغير أو `RELEASE_SIGNING_KEY` تغير. رجع المفتاح الصحيح أو استخدم artifact موثوق معروف المصدر.
 
-## ZIP مرفوض
+## PostgreSQL down
 
-Do not bypass the validator. Fix the reported issue: unsafe path, duplicate normalized path, symlink, archive limits, invisible Unicode, malformed Python/JSON/TOML, or reserved manifest path.
+`/infra` يبين الخطأ. إذا Persistent Job لم يتم تثبيتها بنجاح، TitanBox لا يدعي نجاح العملية. بعد رجوع DB، أعد الأمر. Jobs التي كانت مثبتة يمكن للworker استئنافها.
 
-## Rollback مرفوض بسبب integrity
+## Job بقي running بعد crash
 
-The stored release changed after validation. Do not force it active. Deploy a known-good Git/release artifact instead.
+الworker يستخدم lease. بعد انتهاء lease يرجع stale job إلى queue إذا attempts ما تجاوزت الحد. `/jobs` يبين state/attempts/error.
 
-## ملفات `/deploy` اختفت
+## Render نام
 
-Expected on Render Free after restart/redeploy/spin-down. Local filesystem is not durable. Keep durable code in Git and persistent data/files in external DB/object storage.
+أول Incoming request يصحيه. افتح `/wakez` أو أرسل للبوت وانتظر cold start. لا تعمل self-ping loop داخل TitanBox. إذا تحتاج latency ثابتة استخدم always-on compute.
 
-## `CONTROL_PLANE_ONLY` يمنع إضافة Bot جديد
+## ملفات local اختفت
 
-Intentional. This service is Deploy Admin/control plane only. Create the student/public bot in a separate service/container for strong isolation.
+طبيعي على ephemeral filesystem. استعمل `/backups PROJECT` و`/restore PROJECT latest` إذا S3 مفعلة. كود الإنتاج الدائم يبقى Git أيضاً.
 
-## Render deployment لا يبدأ بعد push
+## `CONTROL_PLANE_ONLY` يمنع Bot جديد
 
-v0.4 uses `autoDeployTrigger: checksPass`. Open GitHub Actions. Fix failing CI/security checks first; do not bypass them unless you intentionally switch to a manual emergency deployment.
-
-## Out of memory / slow runtime
-
-Use `/system`; reduce concurrency; keep terminal/runner off if unused; stream files; move AI/PDF/audio work out of the webhook process; separate public bots into independent services.
+مقصود. أنشئ خدمة/Container منفصلة للبوت العام.

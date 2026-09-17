@@ -1,56 +1,37 @@
-# Deploy Admin Bot — TitanBox v0.4
+# Deploy Admin Bot — TitanBox v1
 
-## أوامر الفحص
+## أهم الأوامر
 
 ```text
-/start
-/whoami
 /diag
-/system
 /security
-/help
-```
-
-## 2FA
-
-إذا فعّلت `DEPLOY_REQUIRE_2FA=true` فالأوامر الحساسة تحتاج جلسة مؤقتة:
-
-```text
-/auth 123456
-/lock
-```
-
-راجع `2FA_AR.md`.
-
-## إدارة المشاريع
-
-```text
+/infra
+/setup
+/wake
+/jobs [N]
 /projects
 /use NAME
 /status [NAME]
-/files [NAME] [PREFIX]
+/files [NAME]
 /releases [NAME]
-/audit [N]
+/backups [NAME]
+/restore NAME [RELEASE|latest]
 /restart [NAME]
 /rollback [NAME] [RELEASE]
 ```
 
-لرفع ZIP، أرسل الملف وCaption:
+ZIP كامل:
 
 ```text
-/deploy mybot
+Caption: /deploy mybot
 ```
 
-لتحديث ملف واحد:
+ملف واحد:
 
 ```text
-/put mybot path/to/file.py
+Caption: /put mybot path/to/file.py
 ```
 
-أو `/use mybot` ثم أرسل ملفاً بلا Caption إذا كان اسمه فريداً داخل المشروع.
+إذا PostgreSQL مفعلة، العمليات المعدلة للحالة تُحفظ كPersistent Job قبل التنفيذ. إذا S3 مفعلة، Release الناجحة تحصل Durable signed backup. `/restore` يسترجع النسخة ثم يعيد التحقق منها محلياً قبل اعتمادها.
 
-## ما الذي يحدث عند Deploy؟
-
-الملف ينزل Streaming تحت حد الحجم، ثم staging وفحص ZIP/path/symlink/Unicode/file-count/expanded-size، ثم Python/JSON/TOML validation، ثم SHA-256 release manifest، ثم atomic activation. Rollback يعيد التحقق من integrity قبل التفعيل.
-
-رفع ZIP **لا يعني تشغيل كود عشوائي تلقائياً**. تشغيل تطبيق مستقل يحتاج Runtime/Runner مقصوداً، وللعزل القوي يفضّل Service/Container مستقل.
+بوت الإدارة يقبل private fresh messages فقط، ويستخدم Admin ID allowlist. فعّل TOTP للأوامر الحساسة قبل الاستخدام الجدي.

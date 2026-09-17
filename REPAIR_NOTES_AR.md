@@ -1,31 +1,26 @@
-# إصلاحات v0.4.0
+# TitanBox v1.0.0 FINAL — إصلاحات واعتمادية
 
-## أخطاء/مخاطر تم إغلاقها
+v1 يحتفظ بإصلاحات الإصدارات السابقة ويضيف طبقة Persistence حقيقية.
 
-1. Bot واحد كان يستطيع إزعاج global webhook pool → أضيف per-bot semaphore/rate limit.
-2. Plugin ينهار باستمرار → failure circuit breaker + cooldown.
-3. Webhook ينمسح أو يتغير → watchdog + self-repair.
-4. Body كبير قبل parsing → body-size guard.
-5. معلومات تشخيصية كانت عامة أكثر من اللازم → status/details/metrics/admin surface أصبحت hardened defaults.
-6. Token/secret قد يظهر في error/log → central exact/generic redaction.
-7. Telegram account admin إذا انسرق كان وحده كافياً للتعديل → optional TOTP 2FA.
-8. Deploy Admin داخل group قد يكشف أو ينفذ أوامر → private-chat only.
-9. edited_message قد يحول رسالة قديمة إلى command → تجاهل الإداري منها.
-10. Admin spam → admin token bucket.
-11. لا يوجد سجل إداري tamper-evident → HMAC audit chain.
-12. Release يمكن أن يتغير بعد فحصه → integrity manifest يُراجع قبل activation/rollback.
-13. Releases كانت تستفيد من hard links → ألغيت حتى rollback points ما تشارك inode قابل للكتابة.
-14. أسماء ملفات تحتوي Unicode bidi/invisible chars → ترفض.
-15. `apps.toml` كان يسمح بوضع secrets مباشرة → يرفض أسماء secrets في static env ويوجه إلى env_passthrough.
-16. Deploy Admin وBot عام ممكن يعيشان بنفس process بالغلط → CONTROL_PLANE_ONLY + MAX_BOTS_PER_RUNTIME.
-17. Default image كان ينزل ttyd/nginx حتى وهوما مطفيين → hardened image ما يحتويهم.
-
-## أشياء لا يستطيع ملف كود واحد حلها
-
-- Persistent storage على Render Free.
-- Strict container isolation بين عدة bots داخل Service واحدة.
-- DDoS protection على مستوى مزود الشبكة.
-- Backup خارجي بدون اختيار مزود تخزين/DB.
-- Always-on guarantee على خطة تستعمل sleep.
-
-هذه تحتاج قرار بنية/مزود، مو كود يتظاهر أن القيود غير موجودة.
+- Render URL auto-detection بدون placeholder.
+- background webhook registration + watchdog/self-heal.
+- missing/wrong bot config لا يسقط الخدمة كلها.
+- private-chat admin allowlist + optional TOTP.
+- safe ZIP/path/symlink/Unicode/size/count/config validation.
+- transactional local releases + integrity manifests + rollback.
+- S3-compatible durable releases بنظام candidate -> active حتى النسخة الفاشلة ما تصير latest.
+- SHA-256 للـarchive وHMAC-SHA256 للmetadata/active marker عند وجود `RELEASE_SIGNING_KEY`.
+- PostgreSQL persistent job queue حتى state-changing admin operation تنحفظ قبل التنفيذ وتقدر ترجع بعد process interruption.
+- duplicate Telegram update لا ينشئ job ثانية بسبب unique job key.
+- stale running job يرجع queue بعد lease expiry.
+- `/healthz` خفيف ومحلي؛ `/readyz` يطبق required infrastructure semantics.
+- `/wakez` wake-on-request فقط؛ لا يوجد self-ping loop.
+- Render filesystem ما عاد يُعتبر persistence بأي مكان في التصميم.
+- Control Plane محمي من خلط Student bots عبر `CONTROL_PLANE_ONLY=true` و`MAX_BOTS_PER_RUNTIME=1`.
+- عولج crash window بين نجاح side effect وكتابة Job success عبر idempotent release IDs.
+- عولج خطر Rollback retry بدون release صريح الذي كان ممكن يرجع Release إضافية في المحاولة الثانية.
+- عولج اعتماد Smart file update على active project الموجود فقط بالRAM.
+- عولج ترتيب Remote releases غير الزمني بعد إدخال deterministic job names.
+- عولج latest pointer stale/network ambiguity عبر signed active-marker recovery/self-heal.
+- عولج احتمال valid remote backup يصير غير قابل للاستعادة فقط لأن ZIP النهائي تجاوز Telegram upload ceiling.
+- عولج Cold-start DB pool creation race بـasync lock.

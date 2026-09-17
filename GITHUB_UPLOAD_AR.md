@@ -1,29 +1,27 @@
-# شلون ترفع v0.4 إلى GitHub — للمبتدئ
+# رفع TitanBox v1.0.0 إلى GitHub — للمبتدئ
 
-الحزمة كاملة وليست ملف Python واحد لأن الإصلاحات موزعة على Docker/Render/runtime/security/tests/CI.
+بعد فك ZIP ستجد مجلد `TitanBox-1.0.0-FINAL`. ارفع **المحتويات داخله** إلى جذر repository الحالي.
 
-## مهم
-
-بعد فك ZIP ستجد مجلد `TitanBox-0.4.0-HARDENED`. ارفع **المحتويات اللي داخله** إلى جذر repository الحالي.
-
-يجب أن تشوف في الصفحة الرئيسية لـGitHub مباشرة:
+الصحيح:
 
 ```text
-Dockerfile
-render.yaml
-requirements.txt
-src/
-scripts/
-config/
-.github/
+repo/
+  Dockerfile
+  render.yaml
+  requirements.txt
+  src/
+  scripts/
+  tests/
+  docs/
+  .github/
 ```
 
-لا تجعلها:
+الخطأ:
 
 ```text
-repo/TitanBox-0.4.0-HARDENED/Dockerfile
+repo/TitanBox-1.0.0-FINAL/Dockerfile
 ```
 
-خذ Backup/Branch من النسخة الحالية أولاً، ثم استبدل الملفات. لا تضع Bot Token داخل أي ملف. الـToken يبقى في Render Environment.
+لا ترفع `.env` ولا أي Token/Password/DSN/S3 Secret. الأسرار تبقى في Render Environment فقط.
 
-بعد Push انتظر GitHub Actions؛ `render.yaml` مضبوط على `checksPass` حتى لا ينشر commit فاشل تلقائياً. بعد نجاح Render افتح `/status` ثم أرسل `/diag`, `/security`, `/system` في Telegram.
+بعد Push انتظر GitHub Actions. `render.yaml` يستخدم `checksPass` حتى الفشل في CI ما يروح تلقائياً للإنتاج.

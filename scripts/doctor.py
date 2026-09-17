@@ -52,6 +52,13 @@ def main() -> int:
             "deploy_admin_ids": sorted(settings.deploy_admin_ids()),
             "missing_token_envs": missing_token_envs,
             "warnings": settings.setup_warnings(),
+            "storage_backend": settings.storage_backend,
+            "durability_required": settings.durability_required,
+            "release_signing_configured": bool(settings.release_signing_key),
+            "postgres_configured": bool(settings.postgres_dsn),
+            "database_required": settings.database_required,
+            "wake_endpoint_enabled": settings.wake_endpoint_enabled,
+            "webhook_register_background": settings.webhook_register_background,
         }
         checks["deploy_root_writable"] = check_write(settings.deploy_root)
     except Exception as exc:

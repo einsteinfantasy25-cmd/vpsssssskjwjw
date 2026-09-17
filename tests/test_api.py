@@ -24,7 +24,7 @@ def test_health_and_public_surface(monkeypatch):
         assert client.get("/readyz").json()["ok"] is True
         assert "TitanBox" in client.get("/").text
         assert client.get("/setup").status_code == 200
-        assert client.get("/status").json()["version"] == "0.4.0"
+        assert client.get("/status").json()["version"] == "1.0.0"
         assert client.get("/metrics").status_code == 404
         response = client.get("/healthz")
         assert response.headers["x-content-type-options"] == "nosniff"

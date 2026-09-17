@@ -32,6 +32,10 @@ services:
         value: "true"
       - key: WEBHOOK_WATCHDOG_ENABLED
         value: "true"
+      - key: WEBHOOK_REGISTER_BACKGROUND
+        value: "true"
+      - key: WAKE_ENDPOINT_ENABLED
+        value: "true"
       - key: WEBHOOK_WATCHDOG_INTERVAL_SECONDS
         value: "300"
       - key: BOTS_JSON
@@ -43,6 +47,8 @@ services:
       - key: ADMIN_TOKEN
         generateValue: true
       - key: AUDIT_HMAC_KEY
+        generateValue: true
+      - key: RELEASE_SIGNING_KEY
         generateValue: true
 
       # Resource containment
@@ -67,13 +73,13 @@ services:
       - key: MEMORY_PRESSURE_LIMIT_PCT
         value: "88"
 
+      # Persistence provider credentials/toggles are intentionally NOT managed here.
+      # Add STORAGE_BACKEND/S3_* and POSTGRES_DSN manually in Render when ready, so a
+      # later Blueprint sync cannot silently reset an operator's persistence settings.
+
       # Deploy Admin
       - key: DEPLOY_ROOT
         value: /workspace/titanbox-data
-      - key: DEPLOY_STORAGE_PERSISTENT
-        value: "false"
-      - key: DEPLOY_REQUIRE_2FA
-        value: "false"
       - key: DEPLOY_ADMIN_RATE_PER_MINUTE
         value: "60"
       - key: DEPLOY_ADMIN_RATE_BURST

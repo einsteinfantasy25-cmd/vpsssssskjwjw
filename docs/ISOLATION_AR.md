@@ -1,27 +1,26 @@
-# العزل بين البوتات — ما هو حقيقي وما هو شكلي؟
+# عزل البوتات — TitanBox v1
 
-## مستويات العزل
+خدمة TitanBox الحالية هي **Control Plane / Deploy Admin فقط**.
 
 ```text
-نفس Python process   = كفاءة عالية، عزل أمني ضعيف/منطقي فقط
-Processes منفصلة     = عزل أخطاء وموارد أحسن، نفس container
-Containers/Services  = عزل أمني وموارد أقوى
-Services + secrets/DB/storage منفصلة = التصميم الموصى به للبوتات المهمة
+Admin service/container A
+  - DEPLOY_BOT_TOKEN
+  - Admin DB role
+  - Admin storage namespace
+
+Student Bot A service/container B
+  - Token A فقط
+  - DB role A فقط
+  - Storage credentials/prefix A فقط
+
+Student Bot B service/container C
+  - Token B فقط
+  - DB role B فقط
+  - Storage credentials/prefix B فقط
 ```
 
-v0.4 يجعل خدمة الإدارة الحالية Control Plane فقط. لا تضف Medical Bot إليها.
+`CONTROL_PLANE_ONLY=true` يمنع إضافة Plugin عام داخل خدمة الإدارة بالغلط، و`MAX_BOTS_PER_RUNTIME=1` يمنع noisy-neighbor غير المقصود داخل نفس Process.
 
-لكل Bot عام مهم استخدم:
+Process منفصل أحسن من shared process، لكن **Container/Service مستقل + Secrets/DB roles/Storage scopes مستقلة** هو الحد الأمني الأقوى اللي نعتمد عليه للبوتات المهمة.
 
-- Service/Container مستقل.
-- Token مستقل.
-- Webhook secret مستقل.
-- Database role/credentials مستقلة أو أقل صلاحيات ممكنة.
-- Storage prefix/bucket policy مستقلة.
-- Rate/concurrency/budget limits مستقلة.
-
-## كيف نثبت أن العزل موجود؟
-
-نفذ اختبارات Chaos/Isolation: إسقاط Bot A، استهلاك RAM/CPU ضمن حدوده، Token خطأ، DB credential خاطئة، storage access خارج namespace، webhook secret متبادل، وتأكد أن Bot B وControl Plane يظلان سليمين.
-
-لا تصف Processes داخل نفس container بأنها "عزل تام"؛ هذا غير صحيح تقنياً.
+اختبارات العزل المستقبلية لكل Bot يجب تشمل: محاولة قراءة secret لبوت ثاني، الوصول لمساره/DB role/storage prefix، CPU/RAM crash isolation، token/webhook cross-routing وcontainer deletion بدون تأثير على الباقين.

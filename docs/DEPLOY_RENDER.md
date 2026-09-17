@@ -1,20 +1,17 @@
-# Render deployment — TitanBox v0.4
+# Render deployment — TitanBox v1.0.0
 
-## Existing v0.3 service
+For an existing service use `UPGRADE_EXISTING_RENDER_AR.md`. For a new service:
 
-Use `UPGRADE_EXISTING_RENDER_AR.md`. Keep the current BotFather token and Telegram admin ID. Replace the repository contents, sync the Blueprint, and deploy the latest commit.
-
-## New service
-
-1. Put this repository at the GitHub repository root.
-2. Render → New → Blueprint → choose the repository.
+1. Put repository contents at GitHub repo root.
+2. Render -> New -> Blueprint -> select repo.
 3. Supply `DEPLOY_BOT_TOKEN` when requested.
 4. Deploy.
-5. Send `/start` to Deploy Admin; if no admin ID is configured, the bot returns your numeric Telegram ID without granting administration.
-6. Add that number to `DEPLOY_ADMIN_TELEGRAM_IDS` and redeploy.
+5. `/start` gives your Telegram numeric ID if admin list is not configured.
+6. Add `DEPLOY_ADMIN_TELEGRAM_IDS` and redeploy.
+7. `/diag`, `/security`, `/infra`.
 
-`render.yaml` uses `autoDeployTrigger: checksPass`, so Git-based automatic deployment waits for linked CI checks to pass.
+The Blueprint keeps S3/PostgreSQL optional on the first deploy. Add those provider credentials manually later; see `FINAL_SETUP_AR.md`.
 
-The service is hardened as a **control plane only** with `CONTROL_PLANE_ONLY=true` and `MAX_BOTS_PER_RUNTIME=1`. Public/student bots should be separate services for hard isolation.
+`RELEASE_SIGNING_KEY` is generated as a platform secret. `autoDeployTrigger: checksPass` waits for linked checks before automatic deployment.
 
-Render Free local files are ephemeral. `/deploy` on this service is useful for controlled testing/version management, but durable production code belongs in Git and durable data/files outside local runtime storage.
+This Render service is a control plane only. Do not add student/public bot plugins to it.

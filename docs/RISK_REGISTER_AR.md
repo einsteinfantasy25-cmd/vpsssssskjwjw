@@ -1,18 +1,23 @@
-# سجل المخاطر الواقعي — TitanBox v0.4
+# سجل المخاطر الواقعي — TitanBox v1
 
-| الخطر | ما فعله v0.4 | ما يبقى مطلوباً |
+| الخطر | دفاع v1 | الباقي الواقعي |
 |---|---|---|
-| سرقة Bot Token | Secrets خارج Git + log redaction | Rotate token فور الاشتباه |
-| سرقة Telegram Admin | Allowlist + optional TOTP | فعّل 2FA قبل الاستخدام الجدي |
-| ZIP خبيث | traversal/symlink/limits/Unicode/duplicate-path validation | لا تشغل كود غير موثوق داخل control plane |
-| Release تغيّر بعد الفحص | SHA-256 manifest + verified rollback + no hardlinks | Git artifact/remote signing أقوى مستقبلاً |
-| Bot مزعج/يفشل | per-bot rate/concurrency + circuit breaker | service isolation للبوتات العامة |
-| Webhook يتغير/ينمسح | watchdog + repair | external uptime monitor إذا تحتاج تنبيه أثناء النوم |
-| Request ضخم | streaming request cap | provider-level DDoS/rate protection خارج التطبيق |
-| Secrets في logs | central redaction + repo secret scan | لا تطبع secrets يدوياً؛ provider log policy |
-| فساد إداري | HMAC audit chain | audit export خارجي للدوام |
-| Render Free يمسح الملفات | تحذير وتصميم stateless | Git + external DB + object storage |
-| Render Free ينام | webhook-compatible wake/recovery | paid always-on إذا latency ثابتة مطلوبة |
-| Bot A يؤثر على Bot B | control-plane guard | separate services/containers للبوتات المهمة |
-| Dependency vulnerable | pinned deps + pip-audit + CodeQL | تحديث دوري ومراجعة alerts |
-| Push سيئ يصل Production | CI + `checksPass` auto deploy | branch protection / approvals في GitHub |
+| Render Free ينام | wake-on-request, background webhook recovery, watchdog | latency ثابتة تحتاج always-on compute |
+| Render يمسح القرص | S3 durable releases + PostgreSQL jobs/audit | provider credentials/retention/backup policy |
+| العملية تنقطع بعد أمر Telegram | persistent DB job قبل التنفيذ + unique key + lease recovery | DB نفسها يجب تكون موثوقة |
+| Remote backup ناقص بسبب network | candidate/active two-phase protocol | provider outage يبقى ممكناً |
+| Remote archive فاسد | SHA-256 | storage writer compromise يحتاج HMAC أيضاً |
+| Remote metadata متلاعب | HMAC signing key | rotate key بحذر وحمايته |
+| Bot token مسروق | secrets خارج Git + redaction | rotate في BotFather فوراً |
+| Telegram Admin account مسروق | allowlist + TOTP | حماية حساب Telegram نفسه ضرورية |
+| ZIP خبيث | traversal/symlink/Unicode/duplicate path/size/count checks | لا تشغل كود غير موثوق في control plane |
+| Push سيئ | tests/CodeQL/secret scan/dependency audit/checksPass | branch protection/approval أحسن إذا المشروع كبر |
+| Bot A يؤثر على Bot B | admin service يمنع أكثر من bot | كل public bot = service/container مستقل |
+| OOM/Spam | concurrency/rate/body limits/circuit/cgroup pressure | heavy AI/PDF/audio إلى worker/service خارجي |
+| DB/S3 outage | `/readyz`, `/infra`, fail-closed when required | no cloud provider has 100% availability |
+| Audit local يختفي | DB audit mirror | external immutable log/SIEM أقوى للمشاريع الكبيرة |
+| Signed backup key rotates | verification blocks unknown/tampered backup | keep key stable or maintain explicit key-version rotation |
+| Queued rollback يفقد local releases بعد restart | frozen target + durable restore fallback | يحتاج S3 backup لذلك target |
+| Retry يعيد side effect | deterministic operation ID + idempotent replay | exact-once موزع غير مدعى |
+| latest pointer stale | signed active-marker fallback + pointer self-heal | Object Storage outage يبقى ممكن |
+| S3 custom endpoint addressing | auto path-style + explicit override | اتبع متطلبات مزودك إذا مختلفة |

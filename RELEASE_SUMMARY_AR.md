@@ -1,32 +1,58 @@
-# TitanBox v0.4.0 HARDENED — ملخص الإصدار
+# TitanBox v1.0.0 FINAL — ملخص الإصدار
 
-v0.4 لا يضيف شكليات فقط؛ يعالج نقاط فشل وأمان حقيقية ظهرت أو كان من الممكن أن تظهر لاحقاً.
+هذا الإصدار يجمع Hardening v0.4 مع طبقة Persistence وCold-start recovery.
 
-## أهم الإضافات
+## Reliability
 
-- Control Plane isolation guard: يمنع وضع Bot عام بجانب Deploy Admin بالغلط.
-- Max bots/runtime guard لتجنب التداخل غير المقصود.
-- Per-bot concurrency + rate limit حتى Bot مزعج لا يستهلك الجميع.
-- Circuit breaker للـBot الذي يكرر الأخطاء.
-- Webhook watchdog يفحص ويصلح URL المفقود/المتغير.
-- أقصى حجم لـWebhook body قبل JSON parsing.
-- Secret redaction مركزي للـlogs/errors.
-- Public status/details/metrics/Admin API أقل انكشافاً افتراضياً.
-- TOTP 2FA اختياري للأوامر الحساسة.
-- Admin bot يعمل في private chat فقط ويتجاهل edited messages/callbacks الإدارية.
-- Admin rate limit.
-- HMAC-chained audit trail.
-- SHA-256 manifest لكل Release وفحصه قبل التفعيل/rollback.
-- إلغاء hard links بين Releases حتى تعديل inode واحد لا يخرّب rollback points القديمة.
-- Reject invisible Unicode control/format characters في filenames/paths.
-- Legacy Runner يمنع وضع token/password مباشرة في `apps.toml`.
-- Optional process memory/file-size limits للـLegacy Runner.
-- Uvicorn connection cap + short keep-alive.
-- Hardened Docker image افتراضياً لا يحتوي Web Terminal/nginx/tmux/editor.
-- Optional `Dockerfile.terminal` منفصل إذا احتجت Terminal وأنت تقبل attack surface الأكبر.
-- CodeQL + dependency audit + test/compile/docker CI.
-- Telegram `allowed_updates` أصبح قابل للتحديد؛ Deploy Admin يطلب `message` فقط لتقليل سطح الإدخال.
-- Webhook body يُقرأ Streaming بحد صارم حتى chunked requests ما تفرض buffering غير محدود.
-- Duplicate update وهو ما يزال In-flight لا يأخذ 200 مبكر؛ يُطلب Retry حتى لا تضيع العملية إذا الطلب الأصلي فشل.
-- ZIP duplicate paths بعد normalization تُرفض لمنع extraction-order ambiguity.
-- CI يضيف repository secret scan، وRender auto deploy ينتظر `checksPass` بدل نشر commit فاشل مباشرة.
+- S3-compatible durable release backups.
+- Two-phase backup commit: candidate لا تصبح Active إلا بعد نجاح activation/health.
+- SHA-256 verification + HMAC authenticity للmetadata/active markers عند وجود `RELEASE_SIGNING_KEY`.
+- PostgreSQL persistent jobs للـdeploy/restart/rollback/restore.
+- Duplicate Telegram retry -> نفس Unique Job وليس عملية ثانية.
+- Stale running job lease -> يعود Queue بعد اختفاء worker.
+- `/restore` يمر عبر نفس validators ولا يشغل Remote ZIP مباشرة.
+- Required backend failure يظهر في `/readyz` بدون تحويل `/healthz` إلى restart loop.
+
+## Cold start / Render
+
+- `/wakez` endpoint خفيف للطلب عند الحاجة.
+- Telegram webhook نفسه Incoming request ويمكنه إيقاظ الخدمة على منصات wake-on-request.
+- Bot loading قبل external infrastructure validation.
+- webhook registration/verification بالخلفية.
+- webhook watchdog/self-healing.
+- لا يوجد self-ping loop لتجاوز نوم الخطة.
+
+## Security
+
+- Control-plane-only + max 1 bot/runtime.
+- non-root, no default SSH/VNC/terminal.
+- Telegram webhook secret verification.
+- rate/concurrency/circuit/memory pressure containment.
+- secret redaction.
+- TOTP 2FA للأوامر الحساسة.
+- HMAC-chained audit + optional durable PostgreSQL mirror.
+- safe ZIP extraction and release integrity manifests.
+- generated release signing key.
+- CI/CodeQL/dependency/secret/Docker checks.
+
+حدود صريحة: لا يوجد برنامج يضمن منع كل failure أو compromise مستقبلاً. العزل التام بين تطبيقات مختلفة يحتاج Containers/Services مستقلة، والـalways-on الحقيقي يحتاج compute لا ينام.
+
+## إضافات الاعتمادية الأخيرة
+
+- Persistent document jobs لا تعتمد على `/use` الموجود بالRAM؛ يتحول Smart Update إلى `/put PROJECT PATH` صريح قبل دخوله PostgreSQL.
+- Rollback وRestore `latest` يثبتان Target صريح قبل Queue حتى Retry بعد crash ما يتحرك إلى Release ثانية.
+- Deploy/Put/Restore تستخدم deterministic Operation ID لمنع إنشاء Release ثانية عند replay.
+- إذا queued Rollback فقد نسخه المحلية بسبب Render restart، يقدر يرجع لنفس Target من Durable Storage إذا موجود.
+- ترتيب Durable backups يعتمد signed `activated_at` وليس الاسم.
+- signed latest pointer self-heals من Active Markers إذا صار stale بسبب network ambiguity.
+- Restore من S3 لا ينكسر بسبب Telegram upload limit؛ له internal bounded restore limit مستقل بعد HMAC/SHA verification.
+- PostgreSQL pool startup صار serialized حتى Cold Start ما ينشئ Poolين بسبب race بين worker وhealth task.
+- Custom S3 endpoints default إلى path-style مع override متاح.
+
+
+## Final verification
+
+- 101 automated tests passed.
+- Real ASGI smoke passed for `/healthz`, `/wakez`, `/status`, `/readyz`.
+- Authenticated webhook stress smoke: 1,500 requests, concurrency 50, zero failures; wrong secret returned 403.
+- Exact Render performance is not guaranteed by local benchmarks.

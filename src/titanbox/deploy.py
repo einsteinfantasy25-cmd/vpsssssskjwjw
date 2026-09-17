@@ -64,12 +64,21 @@ class DeployLimits:
 class DeploymentManager:
     """Transactional, release-based deployment manager for admin-owned projects."""
 
-    def __init__(self, root: Path, limits: DeployLimits, runner: Any | None = None):
+    def __init__(
+        self,
+        root: Path,
+        limits: DeployLimits,
+        runner: Any | None = None,
+        durable_store: Any | None = None,
+        durability_required: bool = False,
+    ):
         self.root = root.resolve()
         self.projects_root = self.root / "projects"
         self.tmp_root = self.root / "tmp"
         self.limits = limits
         self.runner = runner
+        self.durable_store = durable_store
+        self.durability_required = bool(durability_required)
         self._locks: dict[str, asyncio.Lock] = {}
         self.projects_root.mkdir(parents=True, exist_ok=True)
         self.tmp_root.mkdir(parents=True, exist_ok=True)
@@ -215,9 +224,15 @@ class DeploymentManager:
             "runner": app_status,
         }
 
-    def _new_release_name(self, source_path: Path | None = None) -> str:
-        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-        entropy = f"{time.time_ns()}:{os.getpid()}".encode()
+    def _new_release_name(self, source_path: Path | None = None, *, operation_id: str | None = None) -> str:
+        if operation_id:
+            op = hashlib.sha256(operation_id.encode("utf-8", "strict")).hexdigest()[:16]
+            content = self._file_sha256(source_path)[:12] if source_path and source_path.is_file() else "no-source"
+            return f"job-{op}-{content}"
+        now_ns = time.time_ns()
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(now_ns / 1_000_000_000))
+        fraction = f"{now_ns % 1_000_000_000:09d}"
+        entropy = f"{now_ns}:{os.getpid()}".encode()
         if source_path and source_path.exists() and source_path.is_file():
             try:
                 with source_path.open("rb") as handle:
@@ -225,7 +240,7 @@ class DeploymentManager:
             except OSError:
                 pass
         suffix = hashlib.sha256(entropy).hexdigest()[:8]
-        return f"{stamp}-{suffix}"
+        return f"{stamp}-{fraction}-{suffix}"
 
     def _clone_release(self, source: Path, destination: Path) -> None:
         # Do not hard-link files across releases. Hard links save disk, but a running process
@@ -464,6 +479,29 @@ class DeploymentManager:
         os.replace(tmp_link, link)
         return previous
 
+    async def _restore_after_failed_activation(self, project: str, previous: str | None) -> None:
+        """Best-effort return to the exact pre-deploy state, including first-deploy failure."""
+        if previous is not None:
+            self._activate_release(project, previous)
+            try:
+                await self._restart_and_verify(project)
+            except Exception:
+                pass
+            return
+
+        # First deploy had no previous release. Leaving the failed new `current` symlink would
+        # make the next process start use code we already know is unhealthy. Remove it.
+        link = self.current_link(project)
+        if link.is_symlink():
+            link.unlink(missing_ok=True)
+        if self.runner is not None and project in getattr(self.runner, "states", {}):
+            stopper = getattr(self.runner, "stop_app", None)
+            if callable(stopper):
+                try:
+                    await stopper(project)
+                except Exception:
+                    pass
+
     async def _restart_and_verify(self, project: str) -> bool:
         if self.runner is None or project not in getattr(self.runner, "states", {}):
             return False
@@ -478,18 +516,51 @@ class DeploymentManager:
         return True
 
     async def _finalize_release(self, project: str, release: str, validation: tuple[str, ...]) -> DeployResult:
+        checks = list(validation)
+        candidate_persisted = False
+        if self.durable_store is not None and self.durable_store.enabled:
+            try:
+                await self.durable_store.backup_release(project, release, self.releases_dir(project) / release)
+                candidate_persisted = True
+                checks.append("persistent-backup:candidate-ok")
+            except Exception as exc:
+                if self.durability_required:
+                    raise DeployError(
+                        f"Durable backup failed; release was not activated: {type(exc).__name__}"
+                    ) from exc
+                checks.append("persistent-backup:warning")
+
         previous = self._activate_release(project, release)
         restarted = False
         try:
             restarted = await self._restart_and_verify(project)
         except Exception as exc:
-            if previous is not None:
-                self._activate_release(project, previous)
+            await self._restore_after_failed_activation(project, previous)
+            if candidate_persisted:
                 try:
-                    await self._restart_and_verify(project)
+                    await self.durable_store.abandon_release(project, release)
                 except Exception:
                     pass
-            raise DeployError(f"Activation failed and previous release was restored: {exc}") from exc
+            raise DeployError(f"Activation failed and previous state was restored: {exc}") from exc
+
+        if candidate_persisted:
+            try:
+                await self.durable_store.promote_release(project, release)
+                checks.append("persistent-backup:active-ok")
+            except Exception as exc:
+                # Never leave a half-promoted remote release around. Required durability
+                # additionally rolls the local deployment back; optional durability keeps
+                # the healthy local release but discards the incomplete remote candidate.
+                try:
+                    await self.durable_store.abandon_release(project, release)
+                except Exception:
+                    pass
+                if self.durability_required:
+                    await self._restore_after_failed_activation(project, previous)
+                    raise DeployError(
+                        f"Durable commit failed; previous state was restored: {type(exc).__name__}"
+                    ) from exc
+                checks.append("persistent-commit:warning")
 
         self._prune_releases(project, protect={release, previous} if previous else {release})
         return DeployResult(
@@ -498,8 +569,80 @@ class DeploymentManager:
             previous_release=previous,
             restarted=restarted,
             rolled_back=False,
-            validation=validation,
+            validation=tuple(checks),
         )
+
+    async def _resume_idempotent_current(self, project: str, release: str) -> DeployResult:
+        final = self.releases_dir(project) / release
+        self._verify_manifest(final)
+        checks = ["idempotent-replay", "integrity-manifest:ok"]
+        if self.durable_store is not None and self.durable_store.enabled:
+            try:
+                # Promotion is deliberately idempotent. This repairs the crash window where
+                # local activation succeeded but the DB job completion/remote active marker
+                # did not finish before the process disappeared.
+                await self.durable_store.promote_release(project, release)
+                checks.append("persistent-backup:active-ok")
+            except Exception as exc:
+                if self.durability_required:
+                    raise DeployError(
+                        f"Durable reconciliation failed for an already-active idempotent release: {type(exc).__name__}"
+                    ) from exc
+                checks.append("persistent-commit:warning")
+        restarted = await self._restart_and_verify(project)
+        return DeployResult(
+            project=project,
+            release=release,
+            previous_release=None,
+            restarted=restarted,
+            rolled_back=False,
+            validation=tuple(checks),
+        )
+
+    async def list_durable_projects(self, limit: int = 100) -> list[str]:
+        if self.durable_store is None or not self.durable_store.enabled:
+            return []
+        try:
+            return await self.durable_store.list_projects(limit=limit)
+        except Exception as exc:
+            raise DeployError(f"Could not list durable projects: {type(exc).__name__}") from exc
+
+    async def list_backups(self, project: str, limit: int = 30) -> list[str]:
+        project = self.validate_project_name(project)
+        if self.durable_store is None or not self.durable_store.enabled:
+            return []
+        try:
+            return await self.durable_store.list_releases(project, limit=limit)
+        except Exception as exc:
+            raise DeployError(f"Could not list durable backups: {type(exc).__name__}") from exc
+
+    async def restore_backup(
+        self, project: str, release: str | None = None, *, operation_id: str | None = None
+    ) -> DeployResult:
+        project = self.validate_project_name(project)
+        if self.durable_store is None or not self.durable_store.enabled:
+            raise DeployError("External durable storage is not configured.")
+        try:
+            if release in {None, "", "latest"}:
+                release = await self.durable_store.latest_release(project)
+                if not release:
+                    raise DeployError("No active durable backup exists for this project.")
+            fd, temp_name = tempfile.mkstemp(prefix="restore-", suffix=".zip", dir=self.tmp_root)
+            os.close(fd)
+            temp = Path(temp_name)
+            try:
+                await self.durable_store.download_archive(project, release, temp)
+                # Route restored bytes through the same safe extraction, syntax validation,
+                # integrity-manifest and runtime-health path as a fresh Telegram deployment.
+                return await self.deploy_zip(
+                    project, temp, operation_id=operation_id, trusted_durable_restore=True
+                )
+            finally:
+                temp.unlink(missing_ok=True)
+        except DeployError:
+            raise
+        except Exception as exc:
+            raise DeployError(f"Durable restore failed: {type(exc).__name__}: {str(exc)[:160]}") from exc
 
     def _prune_releases(self, project: str, protect: set[str | None]) -> None:
         keep = max(2, self.limits.keep_releases)
@@ -511,17 +654,44 @@ class DeploymentManager:
                 continue
             shutil.rmtree(self.releases_dir(project) / release, ignore_errors=True)
 
-    async def deploy_zip(self, project: str, archive: Path) -> DeployResult:
+    async def deploy_zip(
+        self,
+        project: str,
+        archive: Path,
+        *,
+        operation_id: str | None = None,
+        trusted_durable_restore: bool = False,
+    ) -> DeployResult:
         project = self.validate_project_name(project)
-        if archive.stat().st_size > self.limits.max_upload_bytes:
+        archive_size = archive.stat().st_size
+        if trusted_durable_restore:
+            # Telegram's upload ceiling must not make a valid full-project S3 backup
+            # unrestorable after many single-file updates. The original release was already
+            # bounded by max_extracted_bytes/file_count, and the durable archive is HMAC/SHA
+            # verified before this path. Still impose a finite internal archive ceiling.
+            internal_limit = max(
+                self.limits.max_upload_bytes,
+                self.limits.max_extracted_bytes
+                + (self.limits.max_archive_files * 1024)
+                + 1_048_576,
+            )
+            if archive_size > internal_limit:
+                raise DeployError("Durable restore archive exceeds the internal safety limit.")
+        elif archive_size > self.limits.max_upload_bytes:
             raise DeployError("Upload exceeds configured size limit.")
         async with self._lock(project):
             project_dir = self.project_dir(project)
             releases = self.releases_dir(project)
             releases.mkdir(parents=True, exist_ok=True)
-            release = self._new_release_name(archive)
+            release = self._new_release_name(archive, operation_id=operation_id)
             staging = project_dir / f".staging-{release}"
             final = releases / release
+            if final.exists():
+                if operation_id and self.current_release_name(project) == release:
+                    return await self._resume_idempotent_current(project, release)
+                # A process can die after staging became a final directory but before it was
+                # activated. Rebuild that deterministic job release from the original upload.
+                shutil.rmtree(final, ignore_errors=True)
             try:
                 await asyncio.to_thread(self._safe_extract_zip, archive, staging)
                 validation = await asyncio.to_thread(self._validate_tree, staging)
@@ -533,7 +703,9 @@ class DeploymentManager:
                     shutil.rmtree(final, ignore_errors=True)
                 raise
 
-    async def put_file(self, project: str, relative_path: str, uploaded: Path) -> DeployResult:
+    async def put_file(
+        self, project: str, relative_path: str, uploaded: Path, *, operation_id: str | None = None
+    ) -> DeployResult:
         project = self.validate_project_name(project)
         rel = self.validate_relative_path(relative_path)
         if uploaded.stat().st_size > self.limits.max_upload_bytes:
@@ -543,9 +715,13 @@ class DeploymentManager:
             if current is None:
                 raise DeployError("Project does not exist yet. Deploy a ZIP first.")
             releases = self.releases_dir(project)
-            release = self._new_release_name(uploaded)
+            release = self._new_release_name(uploaded, operation_id=operation_id)
             staging = self.project_dir(project) / f".staging-{release}"
             final = releases / release
+            if final.exists():
+                if operation_id and self.current_release_name(project) == release:
+                    return await self._resume_idempotent_current(project, release)
+                shutil.rmtree(final, ignore_errors=True)
             try:
                 await asyncio.to_thread(self._clone_release, current, staging)
                 (staging / MANIFEST_NAME).unlink(missing_ok=True)
@@ -569,7 +745,9 @@ class DeploymentManager:
                     shutil.rmtree(final, ignore_errors=True)
                 raise
 
-    async def rollback(self, project: str, release: str | None = None) -> DeployResult:
+    async def rollback(
+        self, project: str, release: str | None = None, *, idempotent: bool = False
+    ) -> DeployResult:
         project = self.validate_project_name(project)
         async with self._lock(project):
             current = self.current_release_name(project)
@@ -584,7 +762,21 @@ class DeploymentManager:
             if release not in releases:
                 raise DeployError("Requested release does not exist.")
             if release == current:
-                raise DeployError("Requested release is already active.")
+                if not idempotent:
+                    raise DeployError("Requested release is already active.")
+                path = self.current_release_path(project)
+                if path is None:
+                    raise DeployError("Current release pointer is invalid.")
+                self._verify_manifest(path)
+                restarted = await self._restart_and_verify(project)
+                return DeployResult(
+                    project=project,
+                    release=release,
+                    previous_release=current,
+                    restarted=restarted,
+                    rolled_back=True,
+                    validation=("rollback:idempotent", "integrity-manifest:ok"),
+                )
             self._activate_release(project, release)
             restarted = False
             try:

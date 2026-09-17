@@ -1,16 +1,16 @@
-# TitanBox v0.4 performance and resource containment
+# TitanBox v1 performance / resource containment
 
-TitanBox optimizes for small containers without pretending to create more CPU/RAM than the host grants.
+- one Uvicorn worker by default
+- async HTTP/Telegram I/O and shared connection pools
+- global/per-bot concurrency limits
+- token-bucket rate limiting
+- failure circuit breaker
+- bounded update dedupe
+- streamed webhook request size cap
+- cgroup-aware memory pressure backpressure
+- streamed Telegram downloads and bounded ZIP expansion
+- lazy import of boto3/asyncpg: disabled backends do not pay their normal startup path
+- external S3/PostgreSQL checks are not part of `/healthz`
+- bot loads before background infrastructure validation to reduce cold-start critical path
 
-- One Uvicorn worker by default avoids duplicating Python/library memory.
-- Async I/O and a shared `httpx.AsyncClient` reuse connections.
-- Global and per-bot semaphores cap concurrent webhook work.
-- Per-bot token buckets contain noisy bots.
-- Handler timeouts and a failure circuit breaker stop repeated failures from consuming the whole runtime.
-- Update dedupe is bounded; an in-flight duplicate receives a retry response instead of a premature success acknowledgement.
-- Webhook bodies are streamed under `WEBHOOK_MAX_BODY_BYTES`.
-- Memory pressure uses cgroup-aware readings.
-- Uploads/downloads are streamed; archive expansion is limited by count and extracted bytes.
-- Heavy AI/audio/PDF work should leave the webhook service and run externally/through a queue.
-
-For a 512 MiB-class environment, keep meaningful headroom for Python bursts, TLS/network buffers, deploy variance, and platform overhead. Do not size capacity from host-level `free -h`; use container/cgroup metrics.
+Heavy transcription/LLM/OCR/video/PDF tasks must not run inside the Deploy Admin webhook handler. Put them in isolated bot/worker services with bounded queues.

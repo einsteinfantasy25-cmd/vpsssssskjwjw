@@ -103,7 +103,6 @@ class Settings:
     deploy_stabilize_seconds: int
     deploy_restart_timeout_seconds: int
     deploy_max_concurrent_ops: int
-    deploy_storage_persistent: bool
     deploy_require_2fa: bool
     deploy_totp_secret: str | None
     deploy_2fa_session_seconds: int
@@ -112,9 +111,36 @@ class Settings:
     audit_log_path: Path
     audit_hmac_key: str | None
     audit_max_bytes: int
+    storage_backend: str
+    s3_endpoint_url: str | None
+    s3_region: str | None
+    s3_bucket: str | None
+    s3_access_key_id: str | None
+    s3_secret_access_key: str | None
+    s3_prefix: str
+    s3_force_path_style: bool
+    s3_server_side_encryption: str | None
+    durable_keep_releases: int
+    durability_required: bool
+    release_signing_key: str | None
+    postgres_dsn: str | None
+    database_required: bool
+    db_pool_min: int
+    db_pool_max: int
+    db_connect_timeout_seconds: int
+    infra_startup_timeout_seconds: int
+    webhook_register_background: bool
+    wake_endpoint_enabled: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
+        storage_backend = os.getenv("STORAGE_BACKEND", "none").strip().lower()
+        s3_endpoint_url = os.getenv("S3_ENDPOINT_URL", "").strip().rstrip("/") or None
+        postgres_dsn = os.getenv("POSTGRES_DSN", "").strip() or None
+        # Safe adaptive defaults: once a persistent backend is configured, treat it as
+        # required unless the operator explicitly opts into degraded mode.
+        durability_required_default = storage_backend == "s3"
+        database_required_default = bool(postgres_dsn)
         return cls(
             host=os.getenv("HOST", "0.0.0.0"),
             port=_int("PORT", 10000, 1, 65535),
@@ -159,7 +185,6 @@ class Settings:
             deploy_stabilize_seconds=_int("DEPLOY_STABILIZE_SECONDS", 2, 1, 30),
             deploy_restart_timeout_seconds=_int("DEPLOY_RESTART_TIMEOUT_SECONDS", 12, 2, 120),
             deploy_max_concurrent_ops=_int("DEPLOY_MAX_CONCURRENT_OPS", 1, 1, 4),
-            deploy_storage_persistent=_bool("DEPLOY_STORAGE_PERSISTENT", False),
             deploy_require_2fa=_bool("DEPLOY_REQUIRE_2FA", False),
             deploy_totp_secret=os.getenv("DEPLOY_TOTP_SECRET", "").strip() or None,
             deploy_2fa_session_seconds=_int("DEPLOY_2FA_SESSION_SECONDS", 300, 30, 3600),
@@ -168,6 +193,29 @@ class Settings:
             audit_log_path=Path(os.getenv("AUDIT_LOG_PATH", "/workspace/titanbox-data/audit/audit.jsonl")),
             audit_hmac_key=os.getenv("AUDIT_HMAC_KEY", "").strip() or None,
             audit_max_bytes=_int("AUDIT_MAX_BYTES", 5_000_000, 100_000, 100_000_000),
+            storage_backend=storage_backend,
+            s3_endpoint_url=s3_endpoint_url,
+            s3_region=os.getenv("S3_REGION", "auto").strip() or None,
+            s3_bucket=os.getenv("S3_BUCKET", "").strip() or None,
+            s3_access_key_id=os.getenv("S3_ACCESS_KEY_ID", "").strip() or None,
+            s3_secret_access_key=os.getenv("S3_SECRET_ACCESS_KEY", "").strip() or None,
+            s3_prefix=os.getenv("S3_PREFIX", "titanbox").strip().strip("/"),
+            # Custom S3-compatible endpoints (R2/MinIO/B2, etc.) commonly work most
+            # reliably with path-style addressing. AWS S3 without a custom endpoint keeps
+            # virtual-host style. Operators can override explicitly either way.
+            s3_force_path_style=_bool("S3_FORCE_PATH_STYLE", bool(s3_endpoint_url)),
+            s3_server_side_encryption=os.getenv("S3_SERVER_SIDE_ENCRYPTION", "").strip() or None,
+            durable_keep_releases=_int("DURABLE_KEEP_RELEASES", 20, 2, 500),
+            durability_required=_bool("DURABILITY_REQUIRED", durability_required_default),
+            release_signing_key=os.getenv("RELEASE_SIGNING_KEY", "").strip() or None,
+            postgres_dsn=postgres_dsn,
+            database_required=_bool("DATABASE_REQUIRED", database_required_default),
+            db_pool_min=_int("DB_POOL_MIN", 1, 1, 10),
+            db_pool_max=_int("DB_POOL_MAX", 4, 1, 50),
+            db_connect_timeout_seconds=_int("DB_CONNECT_TIMEOUT_SECONDS", 5, 1, 30),
+            infra_startup_timeout_seconds=_int("INFRA_STARTUP_TIMEOUT_SECONDS", 8, 1, 30),
+            webhook_register_background=_bool("WEBHOOK_REGISTER_BACKGROUND", False),
+            wake_endpoint_enabled=_bool("WAKE_ENDPOINT_ENABLED", True),
         )
 
     def bot_descriptors(self) -> list[dict[str, Any]]:
@@ -212,7 +260,18 @@ class Settings:
             self.terminal_password,
             self.deploy_totp_secret,
             self.audit_hmac_key,
+            self.s3_access_key_id,
+            self.s3_secret_access_key,
+            self.release_signing_key,
+            self.postgres_dsn,
         ]
+        if self.postgres_dsn:
+            try:
+                parsed = urlparse(self.postgres_dsn)
+                if parsed.password:
+                    values.append(parsed.password)
+            except Exception:
+                pass
         for descriptor in self.bot_descriptors():
             if not isinstance(descriptor, dict):
                 continue
@@ -243,10 +302,20 @@ class Settings:
             warnings.append("Multiple Ultra Mode bots share one Python process. This is efficient but not a strict security boundary; use separate services for hard isolation.")
         if self.control_plane_only:
             warnings.append("CONTROL_PLANE_ONLY is enabled: this runtime is reserved for Deploy Admin/control-plane components.")
-        if self.platform == "render" and not self.deploy_storage_persistent:
+        if self.platform == "render" and not (self.storage_backend == "s3"):
             warnings.append(
-                "Render filesystem is ephemeral. Telegram file deployments are not durable across restart/redeploy/spin-down unless external persistence is configured."
+                "Render filesystem is ephemeral. Enable S3-compatible durable storage before relying on Telegram file deployments."
             )
+        if self.platform == "render":
+            warnings.append(
+                "Render Free can cold-start after idle periods. TitanBox supports wake-on-request and cold-start recovery; it does not self-ping to bypass platform limits."
+            )
+        if self.storage_backend == "s3" and not self.release_signing_key:
+            warnings.append("Durable storage is enabled but RELEASE_SIGNING_KEY is missing; remote release tamper authentication is unavailable.")
+        if self.storage_backend == "s3" and not self.durability_required:
+            warnings.append("Durable storage is configured but DURABILITY_REQUIRED=false; a deploy may continue if remote backup fails.")
+        if self.postgres_dsn and not self.database_required:
+            warnings.append("PostgreSQL is configured but DATABASE_REQUIRED=false; DB outage will not block readiness.")
         return warnings
 
     def validate(self) -> None:
@@ -288,6 +357,37 @@ class Settings:
                 raise ValueError("PUBLIC_BASE_URL must use HTTPS for Telegram webhooks")
             if not parsed.netloc:
                 raise ValueError("PUBLIC_BASE_URL is invalid")
+
+        if self.storage_backend not in {"none", "s3"}:
+            raise ValueError("STORAGE_BACKEND must be 'none' or 's3'")
+        if self.storage_backend == "s3":
+            missing = []
+            if not self.s3_bucket:
+                missing.append("S3_BUCKET")
+            if not self.s3_access_key_id:
+                missing.append("S3_ACCESS_KEY_ID")
+            if not self.s3_secret_access_key:
+                missing.append("S3_SECRET_ACCESS_KEY")
+            if not self.release_signing_key:
+                missing.append("RELEASE_SIGNING_KEY")
+            if missing:
+                raise ValueError("STORAGE_BACKEND=s3 requires " + ", ".join(missing))
+            if self.s3_endpoint_url:
+                parsed_storage = urlparse(self.s3_endpoint_url)
+                if parsed_storage.scheme != "https" or not parsed_storage.netloc:
+                    raise ValueError("S3_ENDPOINT_URL must be a valid HTTPS URL")
+        if self.durability_required and self.storage_backend != "s3":
+            raise ValueError("DURABILITY_REQUIRED=true requires STORAGE_BACKEND=s3")
+        if self.storage_backend == "s3" and self.release_signing_key and len(self.release_signing_key) < 32:
+            raise ValueError("RELEASE_SIGNING_KEY must be at least 32 characters when configured")
+        if self.database_required and not self.postgres_dsn:
+            raise ValueError("DATABASE_REQUIRED=true requires POSTGRES_DSN")
+        if self.postgres_dsn:
+            parsed_db = urlparse(self.postgres_dsn)
+            if parsed_db.scheme not in {"postgres", "postgresql"} or not parsed_db.hostname:
+                raise ValueError("POSTGRES_DSN must be a valid postgres/postgresql URL")
+        if self.db_pool_min > self.db_pool_max:
+            raise ValueError("DB_POOL_MIN must be <= DB_POOL_MAX")
 
         # Validate admin ID syntax but deliberately allow an empty list. In discovery mode
         # /start and /whoami return the caller's own Telegram ID without granting admin access.

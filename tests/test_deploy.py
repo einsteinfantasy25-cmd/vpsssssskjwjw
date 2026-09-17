@@ -163,7 +163,7 @@ async def test_failed_restart_restores_previous_release(tmp_path: Path):
 
     replacement = tmp_path / "main.py"
     replacement.write_text("VALUE = 2\n")
-    with pytest.raises(DeployError, match="previous release was restored"):
+    with pytest.raises(DeployError, match="previous state was restored"):
         await mgr.put_file("mybot", "main.py", replacement)
 
     assert mgr.current_release_name("mybot") == first.release
@@ -272,3 +272,211 @@ async def test_zip_duplicate_normalized_path_is_rejected(tmp_path: Path):
             zf.writestr("main.py", "VALUE = 2\n")
     with pytest.raises(DeployError, match="duplicate normalized path"):
         await mgr.deploy_zip("duplicate", archive)
+
+
+class FakeDurableStore:
+    enabled = True
+
+    def __init__(self, fail: bool = False, promote_fail: bool = False):
+        self.fail = fail
+        self.promote_fail = promote_fail
+        self.backups: list[tuple[str, str]] = []
+        self.active: list[tuple[str, str]] = []
+        self.abandoned: list[tuple[str, str]] = []
+
+    async def backup_release(self, project: str, release: str, release_root: Path):
+        if self.fail:
+            raise RuntimeError("storage down")
+        self.backups.append((project, release))
+        return {"project": project, "release": release, "state": "candidate"}
+
+    async def promote_release(self, project: str, release: str):
+        if self.promote_fail:
+            raise RuntimeError("storage commit down")
+        self.active.append((project, release))
+        return {"project": project, "release": release, "state": "active"}
+
+    async def abandon_release(self, project: str, release: str):
+        self.abandoned.append((project, release))
+        self.active = [item for item in self.active if item != (project, release)]
+
+    async def list_releases(self, project: str, limit: int = 30):
+        return [release for name, release in self.active if name == project][:limit]
+
+    async def latest_release(self, project: str):
+        items = [release for name, release in self.active if name == project]
+        return items[-1] if items else None
+
+
+@pytest.mark.asyncio
+async def test_required_durable_backup_happens_before_activation(tmp_path: Path):
+    limits = DeployLimits(
+        max_upload_bytes=10_000_000, max_archive_files=100, max_extracted_bytes=20_000_000,
+        keep_releases=4, stabilize_seconds=0.1, restart_timeout_seconds=1.0,
+    )
+    durable = FakeDurableStore(fail=True)
+    mgr = DeploymentManager(tmp_path / "data", limits, durable_store=durable, durability_required=True)
+    archive = tmp_path / "app.zip"
+    make_zip(archive, {"main.py": "VALUE = 1\n"})
+    with pytest.raises(DeployError, match="Durable backup failed"):
+        await mgr.deploy_zip("mybot", archive)
+    assert mgr.current_release_name("mybot") is None
+
+
+@pytest.mark.asyncio
+async def test_optional_durable_failure_marks_warning_and_activates(tmp_path: Path):
+    limits = DeployLimits(
+        max_upload_bytes=10_000_000, max_archive_files=100, max_extracted_bytes=20_000_000,
+        keep_releases=4, stabilize_seconds=0.1, restart_timeout_seconds=1.0,
+    )
+    durable = FakeDurableStore(fail=True)
+    mgr = DeploymentManager(tmp_path / "data", limits, durable_store=durable, durability_required=False)
+    archive = tmp_path / "app.zip"
+    make_zip(archive, {"main.py": "VALUE = 1\n"})
+    result = await mgr.deploy_zip("mybot", archive)
+    assert "persistent-backup:warning" in result.validation
+    assert mgr.current_release_name("mybot") == result.release
+
+
+@pytest.mark.asyncio
+async def test_successful_durable_backup_is_promoted_only_after_activation(tmp_path: Path):
+    limits = DeployLimits(
+        max_upload_bytes=10_000_000, max_archive_files=100, max_extracted_bytes=20_000_000,
+        keep_releases=4, stabilize_seconds=0.1, restart_timeout_seconds=1.0,
+    )
+    durable = FakeDurableStore()
+    mgr = DeploymentManager(tmp_path / "data", limits, durable_store=durable, durability_required=True)
+    archive = tmp_path / "app.zip"
+    make_zip(archive, {"main.py": "VALUE = 1\n"})
+    result = await mgr.deploy_zip("mybot", archive)
+    assert "persistent-backup:candidate-ok" in result.validation
+    assert "persistent-backup:active-ok" in result.validation
+    assert durable.backups == [("mybot", result.release)]
+    assert durable.active == [("mybot", result.release)]
+
+
+@pytest.mark.asyncio
+async def test_required_durable_promotion_failure_restores_previous_release(tmp_path: Path):
+    runner = FakeRunner([True, True, True])
+    limits = DeployLimits(
+        max_upload_bytes=10_000_000, max_archive_files=100, max_extracted_bytes=20_000_000,
+        keep_releases=4, stabilize_seconds=0.1, restart_timeout_seconds=1.0,
+    )
+    durable = FakeDurableStore()
+    mgr = DeploymentManager(tmp_path / "data", limits, runner=runner, durable_store=durable, durability_required=True)
+    archive = tmp_path / "first.zip"
+    make_zip(archive, {"main.py": "VALUE = 1\n"})
+    first = await mgr.deploy_zip("mybot", archive)
+    durable.promote_fail = True
+    replacement = tmp_path / "main.py"
+    replacement.write_text("VALUE = 2\n")
+    with pytest.raises(DeployError, match="Durable commit failed"):
+        await mgr.put_file("mybot", "main.py", replacement)
+    assert mgr.current_release_name("mybot") == first.release
+    assert durable.abandoned
+
+
+class FirstDeployFailRunner:
+    def __init__(self):
+        self.states = {"mybot": object()}
+        self.stopped = 0
+
+    async def restart_app(self, name: str):
+        return {}
+
+    async def wait_healthy(self, name: str, grace_seconds: float, timeout_seconds: float):
+        return False
+
+    async def stop_app(self, name: str):
+        self.stopped += 1
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_first_deploy_runtime_failure_leaves_no_current_pointer(tmp_path: Path):
+    runner = FirstDeployFailRunner()
+    limits = DeployLimits(
+        max_upload_bytes=10_000_000, max_archive_files=100, max_extracted_bytes=20_000_000,
+        keep_releases=4, stabilize_seconds=0.1, restart_timeout_seconds=1.0,
+    )
+    mgr = DeploymentManager(tmp_path / "data", limits, runner=runner)
+    archive = tmp_path / "bad-runtime.zip"
+    make_zip(archive, {"main.py": "VALUE = 1\n"})
+    with pytest.raises(DeployError, match="previous state was restored"):
+        await mgr.deploy_zip("mybot", archive)
+    assert mgr.current_release_name("mybot") is None
+    assert runner.stopped == 1
+
+@pytest.mark.asyncio
+async def test_deploy_operation_id_is_idempotent_across_job_retry(tmp_path: Path):
+    mgr = manager(tmp_path / "idem-data")
+    archive = tmp_path / "idem.zip"
+    make_zip(archive, {"main.py": "VALUE = 1\n"})
+    first = await mgr.deploy_zip("idem", archive, operation_id="deploy-admin:123:document")
+    second = await mgr.deploy_zip("idem", archive, operation_id="deploy-admin:123:document")
+    assert first.release == second.release
+    assert mgr.current_release_name("idem") == first.release
+    assert mgr.release_names("idem") == [first.release]
+    assert "idempotent-replay" in second.validation
+
+
+@pytest.mark.asyncio
+async def test_put_operation_id_is_idempotent_across_job_retry(tmp_path: Path):
+    mgr = manager(tmp_path / "idem-put-data")
+    archive = tmp_path / "idem-base.zip"
+    make_zip(archive, {"main.py": "VALUE = 1\n"})
+    base = await mgr.deploy_zip("idemput", archive)
+    replacement = tmp_path / "replacement.py"
+    replacement.write_text("VALUE = 2\n")
+    first = await mgr.put_file("idemput", "main.py", replacement, operation_id="deploy-admin:456:document")
+    second = await mgr.put_file("idemput", "main.py", replacement, operation_id="deploy-admin:456:document")
+    assert first.release == second.release
+    assert mgr.current_release_name("idemput") == first.release
+    assert len(mgr.release_names("idemput")) == 2
+    assert base.release in mgr.release_names("idemput")
+    assert "idempotent-replay" in second.validation
+
+
+@pytest.mark.asyncio
+async def test_idempotent_explicit_rollback_retry_never_walks_back_twice(tmp_path: Path):
+    mgr = manager(tmp_path / "rollback-idem")
+    a = tmp_path / "a.zip"
+    b = tmp_path / "b.zip"
+    c = tmp_path / "c.zip"
+    make_zip(a, {"main.py": "VALUE = 1\n"})
+    make_zip(b, {"main.py": "VALUE = 2\n"})
+    make_zip(c, {"main.py": "VALUE = 3\n"})
+    first = await mgr.deploy_zip("rb", a)
+    await mgr.deploy_zip("rb", b)
+    await mgr.deploy_zip("rb", c)
+    target = mgr.release_names("rb")[1]
+    once = await mgr.rollback("rb", target, idempotent=True)
+    twice = await mgr.rollback("rb", target, idempotent=True)
+    assert once.release == target
+    assert twice.release == target
+    assert mgr.current_release_name("rb") == target
+    assert "rollback:idempotent" in twice.validation
+    assert first.release in mgr.release_names("rb")
+
+@pytest.mark.asyncio
+async def test_verified_durable_restore_is_not_blocked_by_telegram_upload_limit(tmp_path: Path):
+    limits = DeployLimits(
+        max_upload_bytes=120,
+        max_archive_files=100,
+        max_extracted_bytes=20_000,
+        keep_releases=4,
+        stabilize_seconds=0.1,
+        restart_timeout_seconds=1.0,
+    )
+    mgr = DeploymentManager(tmp_path / "durable-size", limits)
+    archive = tmp_path / "larger-than-telegram.zip"
+    # Incompressible-ish bytes make the ZIP larger than the tiny simulated Telegram limit,
+    # while still staying well inside the extracted-content safety budget.
+    import os
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr("blob.bin", os.urandom(1000))
+    assert archive.stat().st_size > limits.max_upload_bytes
+    with pytest.raises(DeployError, match="Upload exceeds"):
+        await mgr.deploy_zip("p", archive)
+    result = await mgr.deploy_zip("p", archive, trusted_durable_restore=True)
+    assert mgr.current_release_name("p") == result.release

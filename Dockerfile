@@ -25,7 +25,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY --chown=app:app . /app
 RUN set -eu; \
     missing=""; \
-    for p in src/titanbox/main.py src/titanbox/settings.py src/titanbox/security.py src/titanbox/audit.py src/titanbox/plugins/deploy_admin.py scripts/entrypoint.sh scripts/generate_totp.py config/apps.toml; do \
+    for p in src/titanbox/main.py src/titanbox/settings.py src/titanbox/security.py src/titanbox/audit.py src/titanbox/storage.py src/titanbox/database.py src/titanbox/infrastructure.py src/titanbox/plugins/deploy_admin.py scripts/entrypoint.sh scripts/generate_totp.py config/apps.toml; do \
       if [ ! -e "/app/$p" ]; then missing="$missing $p"; fi; \
     done; \
     if [ -n "$missing" ]; then \

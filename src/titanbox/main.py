@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 
@@ -10,6 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from . import __version__
 from .auth import admin_guard, secure_equal
+from .infrastructure import InfrastructureManager
 from .runner import AppRunner
 from .security import configure_logging
 from .settings import Settings
@@ -21,7 +23,8 @@ settings.validate()
 configure_logging(settings.log_level, extra_secrets=settings.known_secret_values())
 log = logging.getLogger("titanbox")
 runner = AppRunner(settings.apps_config)
-hub = TelegramHub(settings, runner=runner)
+infrastructure = InfrastructureManager(settings)
+hub = TelegramHub(settings, runner=runner, infrastructure=infrastructure)
 
 
 @asynccontextmanager
@@ -34,13 +37,21 @@ async def lifespan(_: FastAPI):
     )
     if settings.enable_runner:
         await runner.start()
+    # Load Telegram tokens/plugins first. On Render this lets the already-registered webhook
+    # accept the wake-up update as soon as the ASGI server begins serving. External storage/DB
+    # validation continues in the background and controls /readyz when marked required.
     await hub.start()
+    infra_task = asyncio.create_task(infrastructure.start(), name="titanbox-infrastructure-start")
     for warning in settings.setup_warnings():
         log.warning("setup warning: %s", warning)
     try:
         yield
     finally:
+        if not infra_task.done():
+            infra_task.cancel()
+        await asyncio.gather(infra_task, return_exceptions=True)
         await hub.close()
+        await infrastructure.close()
         if settings.enable_runner:
             await runner.close()
         log.info("TitanBox stopped")
@@ -113,7 +124,7 @@ table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px
 <div class="card"><b>Platform:</b> {_safe(settings.platform)}<br><b>Public URL:</b> <code>{_safe(base)}</code><br><b>Configured bots:</b> {hub.configured_count}<br><b>Loaded bots:</b> {len(hub.bots)}</div>
 <div class="card"><h3>حالة البوتات</h3><table><tr><th>الاسم</th><th>Loaded</th><th>Ready</th><th>Username</th><th>الحالة</th></tr>{rows}</table></div>
 <div class="card"><h3>تنبيهات الإعداد</h3><ul>{warning_html}</ul></div>
-<div class="card"><h3>روابط الفحص</h3><p><a href="/setup">/setup — خطوات الإعداد</a></p><p><a href="/status">/status — حالة عامة</a></p><p><a href="/healthz">/healthz — حياة السيرفر</a></p><p><a href="/readyz">/readyz — جاهزية البوتات</a></p></div>
+<div class="card"><h3>روابط الفحص</h3><p><a href="/setup">/setup — خطوات الإعداد</a></p><p><a href="/status">/status — حالة عامة</a></p><p><a href="/healthz">/healthz — حياة السيرفر</a></p><p><a href="/readyz">/readyz — جاهزية البوتات</a></p><p><a href="/wakez">/wakez — إيقاظ/فحص خفيف</a></p></div>
 </body></html>"""
 
 
@@ -138,6 +149,7 @@ async def setup_page():
 <li>في Telegram أرسل <code>/start</code> ثم ضع رقمك داخل <code>DEPLOY_ADMIN_TELEGRAM_IDS</code>.</li>
 <li>للإنتاج فعّل <code>DEPLOY_REQUIRE_2FA=true</code> وضع Base32 secret داخل <code>DEPLOY_TOTP_SECRET</code>.</li>
 <li>استخدم <code>/security</code> و<code>/diag</code> للتأكد من الحماية والـWebhook.</li>
+<li>للتخزين الدائم/DB راجع <code>FINAL_SETUP_AR.md</code> ثم افحص <code>/infra</code>.</li>
 </ol>
 <p><b>مهم:</b> Render Free filesystem مؤقت. GitHub/DB/Object Storage تبقى مصادر البيانات الدائمة.</p>
 <p><b>العزل:</b> Ultra Mode يوفر عزل موارد منطقي فقط؛ العزل الأمني التام يحتاج Service/Container منفصل لكل Bot.</p>
@@ -168,6 +180,19 @@ async def healthz():
     return {"ok": True, "version": __version__}
 
 
+@app.get("/wakez")
+async def wakez():
+    """Very small endpoint for an on-demand wake/availability request.
+
+    This endpoint intentionally does not ping itself or attempt to defeat platform idle
+    policies. Telegram webhooks themselves are also incoming HTTP requests and can wake the
+    service when the hosting platform supports wake-on-request.
+    """
+    if not settings.wake_endpoint_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    return {"ok": True, "awake": True, "version": __version__}
+
+
 @app.get("/readyz")
 async def readyz():
     reasons: list[str] = []
@@ -175,6 +200,9 @@ async def readyz():
         reasons.append("runner_not_started")
     if not hub.all_ready():
         reasons.append("one_or_more_bots_not_ready")
+    infra_ok, infra_reasons = infrastructure.required_ready()
+    if not infra_ok:
+        reasons.extend(infra_reasons)
     content = {
         "ok": not reasons,
         "bots": len(hub.bots),
@@ -239,7 +267,13 @@ async def admin_status():
         "settings_warnings": settings.setup_warnings(),
         "bots": hub.public_status(detailed=True),
         "apps": runner.status() if settings.enable_runner else [],
+        "infrastructure_startup": infrastructure._startup,
     }
+
+
+@app.get("/admin/infrastructure", dependencies=[Depends(admin)])
+async def admin_infrastructure():
+    return await infrastructure.health()
 
 
 def _state_or_404(name: str):

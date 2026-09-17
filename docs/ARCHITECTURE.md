@@ -1,39 +1,47 @@
-# TitanBox v0.4 architecture
-
-TitanBox is a lightweight PaaS control plane/runtime, **not a VPS and not a container escape mechanism**.
-
-## Recommended production shape
+# TitanBox v1.0 architecture
 
 ```text
-Telegram Admin
-     |
-     v
-TitanBox Control Plane (service/container A)
-     |
-     +--> deployment metadata / monitoring / releases
+                         Telegram
+                            |
+                       HTTPS Webhook
+                            |
+                            v
+              +-----------------------------+
+              | TitanBox Control Plane      |
+              | Render service/container A  |
+              | Deploy Admin only           |
+              +-----+-----------+-----------+
+                    |           |
+                 PostgreSQL    S3-compatible Object Storage
+                 jobs/audit    signed releases/backups
 
-Public Bot A (service/container B) --> external DB / object storage / AI
-Public Bot B (service/container C) --> external DB / object storage / AI
+Public/Student Bot A -> service/container B -> own DB role/storage namespace/AI
+Public/Student Bot B -> service/container C -> own DB role/storage namespace/AI
 ```
 
-The Render Blueprint in this release sets `CONTROL_PLANE_ONLY=true` and `MAX_BOTS_PER_RUNTIME=1`, so the existing service is reserved for Deploy Admin. That guard prevents accidentally adding a student/public plugin to the same Python process.
+## Boundaries
 
-## Ultra Mode
+The control plane remains one bot (`MAX_BOTS_PER_RUNTIME=1`). Ultra Mode process sharing is not a hard security boundary; use it only for trusted components where shared failure is acceptable.
 
-Ultra Mode can run multiple trusted, low-traffic plugins in one FastAPI process with one event loop and shared HTTP pools. It is memory-efficient, but **process sharing is not a hard security boundary**. A plugin bug can affect the shared process.
+## Durable release protocol
 
-Use Ultra Mode only where shared-process trust is acceptable. For strong isolation, use separate services/containers and separate secrets/database roles/storage namespaces.
+1. Stage locally.
+2. Validate ZIP/path/syntax/config/integrity.
+3. Upload candidate archive + signed metadata.
+4. Activate local release.
+5. Restart/health-check when applicable.
+6. Promote remote candidate by signed active marker.
+7. On failure restore previous state and abandon candidate.
 
-## Legacy Runner
+Active markers, not `latest.json`, are authoritative for restore discovery.
 
-Legacy scripts can be child processes. The runner provides restart backoff, crash-loop protection, file descriptor limits, optional best-effort address-space/file-size limits, reduced priority, and explicit `env_passthrough` secrets.
+## Persistent admin jobs
 
-A child process in the same container is still not equivalent to a separate container/security domain.
+When PostgreSQL is configured, state-changing admin operations are inserted into `titanbox_jobs` before execution. The worker claims one row transactionally, uses a lease, retries transient failures with backoff and marks permanent validation errors failed. Telegram update IDs form part of the unique key.
 
-## Persistence
+## Health semantics
 
-Local runtime storage must be treated as disposable unless the host provides a persistent volume. Durable code belongs in Git; durable user data belongs in an external database; durable files/backups belong in object storage.
-
-## Heavy work
-
-Webhook handlers should be short. CPU/RAM-heavy PDF, audio, transcription, OCR, LLM, or video work should use an external worker/service/queue instead of blocking the control plane.
+- `/healthz`: process/liveness only; deliberately no remote I/O.
+- `/readyz`: bot + required storage/DB readiness.
+- `/infra`: live S3/PostgreSQL health from the admin bot.
+- `/wakez`: lightweight on-demand wake/check.

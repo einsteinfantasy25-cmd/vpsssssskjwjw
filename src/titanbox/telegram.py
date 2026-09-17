@@ -30,6 +30,8 @@ class PluginServices:
     # convenience/least-privilege-by-convention, not as a hard security boundary.
     settings: Settings
     runner: Any | None = None
+    infrastructure: Any | None = None
+    bot_context: Any | None = None
 
 
 class Plugin(Protocol):
@@ -233,12 +235,13 @@ class BotControl:
 
 
 class TelegramHub:
-    def __init__(self, settings: Settings, runner: Any | None = None):
+    def __init__(self, settings: Settings, runner: Any | None = None, infrastructure: Any | None = None):
         self.settings = settings
         self.runner = runner
+        self.infrastructure = infrastructure
         self.client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=32, max_keepalive_connections=8, keepalive_expiry=20.0),
-            headers={"User-Agent": "TitanBox/0.4"},
+            headers={"User-Agent": "TitanBox/1.0"},
         )
         self.bots: dict[str, BotSpec] = {}
         self.plugins: dict[str, Plugin] = {}
@@ -248,6 +251,7 @@ class TelegramHub:
         self.configured_count = 0
         self._global_slots = asyncio.Semaphore(settings.webhook_max_inflight)
         self._watchdog_task: asyncio.Task[None] | None = None
+        self._initial_register_task: asyncio.Task[list[dict[str, Any]]] | None = None
         self.active_handlers = 0
         self.total_handled = 0
         self.total_rejected = 0
@@ -391,9 +395,22 @@ class TelegramHub:
                     ),
                 )
                 plugin = self._load_plugin(plugin_path)
+                service_bot_context = BotContext(spec.name, spec.token, self.client)
                 binder = getattr(plugin, "bind_services", None)
                 if callable(binder):
-                    binder(PluginServices(settings=self.settings, runner=self.runner))
+                    binder(
+                        PluginServices(
+                            settings=self.settings,
+                            runner=self.runner,
+                            infrastructure=self.infrastructure,
+                            bot_context=service_bot_context,
+                        )
+                    )
+                starter = getattr(plugin, "start", None)
+                if callable(starter):
+                    started = starter()
+                    if started is not None:
+                        await started
                 self.plugins[state_name] = plugin
                 self.dedup[state_name] = UpdateDeduplicator()
                 state.loaded = True
@@ -408,7 +425,16 @@ class TelegramHub:
         # Refresh redaction after all token env vars have been resolved.
         self.redactor.refresh(self.settings.known_secret_values())
         if self.settings.auto_register_webhooks:
-            await self.register_all_webhooks()
+            if self.settings.webhook_register_background:
+                # Cold-start optimization: once tokens/plugins are loaded, the public webhook
+                # can already accept Telegram's previously-registered URL while registration
+                # verification proceeds in the background.
+                self._initial_register_task = asyncio.create_task(
+                    self.register_all_webhooks(),
+                    name="telegram-initial-webhook-register",
+                )
+            else:
+                await self.register_all_webhooks()
         if (
             self.settings.auto_register_webhooks
             and self.settings.webhook_watchdog_enabled
@@ -417,6 +443,10 @@ class TelegramHub:
             self._watchdog_task = asyncio.create_task(self._webhook_watchdog(), name="telegram-webhook-watchdog")
 
     async def close(self) -> None:
+        if self._initial_register_task:
+            self._initial_register_task.cancel()
+            await asyncio.gather(self._initial_register_task, return_exceptions=True)
+            self._initial_register_task = None
         if self._watchdog_task:
             self._watchdog_task.cancel()
             await asyncio.gather(self._watchdog_task, return_exceptions=True)
