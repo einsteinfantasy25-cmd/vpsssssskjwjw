@@ -1,62 +1,31 @@
-# حزمة إصلاح TitanBox v0.3.0
+# إصلاحات v0.4.0
 
-## المشاكل التي عالجتها هذه النسخة
+## أخطاء/مخاطر تم إغلاقها
 
-### 1. Render Free رفض Blueprint
-حُذف الاعتماد على أي setting غير مناسب للخطة المجانية، خصوصاً الخطأ السابق المتعلق بـ `maxShutdownDelaySeconds`.
+1. Bot واحد كان يستطيع إزعاج global webhook pool → أضيف per-bot semaphore/rate limit.
+2. Plugin ينهار باستمرار → failure circuit breaker + cooldown.
+3. Webhook ينمسح أو يتغير → watchdog + self-repair.
+4. Body كبير قبل parsing → body-size guard.
+5. معلومات تشخيصية كانت عامة أكثر من اللازم → status/details/metrics/admin surface أصبحت hardened defaults.
+6. Token/secret قد يظهر في error/log → central exact/generic redaction.
+7. Telegram account admin إذا انسرق كان وحده كافياً للتعديل → optional TOTP 2FA.
+8. Deploy Admin داخل group قد يكشف أو ينفذ أوامر → private-chat only.
+9. edited_message قد يحول رسالة قديمة إلى command → تجاهل الإداري منها.
+10. Admin spam → admin token bucket.
+11. لا يوجد سجل إداري tamper-evident → HMAC audit chain.
+12. Release يمكن أن يتغير بعد فحصه → integrity manifest يُراجع قبل activation/rollback.
+13. Releases كانت تستفيد من hard links → ألغيت حتى rollback points ما تشارك inode قابل للكتابة.
+14. أسماء ملفات تحتوي Unicode bidi/invisible chars → ترفض.
+15. `apps.toml` كان يسمح بوضع secrets مباشرة → يرفض أسماء secrets في static env ويوجه إلى env_passthrough.
+16. Deploy Admin وBot عام ممكن يعيشان بنفس process بالغلط → CONTROL_PLANE_ONLY + MAX_BOTS_PER_RUNTIME.
+17. Default image كان ينزل ttyd/nginx حتى وهوما مطفيين → hardened image ما يحتويهم.
 
-### 2. Docker كان يعطي `/src not found`
-Dockerfile لم يعد يعمل `COPY src`, `COPY config`, `COPY nginx` بشكل منفصل. الآن يعمل COPY واحد للـrepo ثم يفحص الملفات الإلزامية برسالة واضحة.
+## أشياء لا يستطيع ملف كود واحد حلها
 
-### 3. `PUBLIC_BASE_URL` المؤقت
-TitanBox يكتشف تلقائياً `RENDER_EXTERNAL_URL` أو `RENDER_EXTERNAL_HOSTNAME`. لا يحتاج Placeholder على Render.
+- Persistent storage على Render Free.
+- Strict container isolation بين عدة bots داخل Service واحدة.
+- DDoS protection على مستوى مزود الشبكة.
+- Backup خارجي بدون اختيار مزود تخزين/DB.
+- Always-on guarantee على خطة تستعمل sleep.
 
-### 4. Webhook لم يكن يسجل تلقائياً
-Blueprint النهائي يضع:
-
-```text
-AUTO_REGISTER_WEBHOOKS=true
-```
-
-ويتحقق من Telegram عبر `getMe → setWebhook → getWebhookInfo` مع Retry.
-
-### 5. Webhook secret
-Render `generateValue` يولد base64 وقد يحتوي رموز لا يقبلها Telegram في `secret_token`. لذلك v0.3 لا يرسل القيمة المولدة نفسها إلى Telegram؛ يستخدمها كمفتاح داخلي ويشتق منها secret آمن مكوّن فقط من الأحرف المسموحة.
-
-### 6. `/start` كان يسكت عند Admin ID خطأ
-المستخدم غير المصرح لا يُعطى صلاحيات، لكن `/start` و`/whoami` يعرضان Telegram numeric ID الخاص به والتعليمات. لا يوجد تنفيذ إداري قبل إضافته للـallowlist.
-
-### 7. خطأ Bot واحد كان يستطيع إسقاط TitanBox كله
-أخطاء تحميل Bot/Token/plugin أصبحت معزولة لكل bot. TitanBox يبقى Live وتظهر المشكلة في `/status` و`/readyz`.
-
-### 8. الرابط كان غير مفهوم
-`/` أصبح Dashboard واضحة. أضيف `/setup` و`/status` و`/readyz` للتشخيص.
-
-### 9. تشخيص Telegram
-أضيف `/diag` داخل Admin bot ليعرض:
-
-- `getMe`
-- Telegram username
-- Expected webhook
-- Actual webhook
-- pending update count
-- last Telegram webhook error
-
-### 10. Admin ID = 0
-القيمة `0` القديمة تُعامل كـ"غير مضبوط"، وليس كـAdmin وهمي.
-
-### 11. GitHub repository ناقص
-أضيف `scripts/preflight_repo.py`، واختبار CI لعقد الـrelease tree.
-
-### 12. سلامة الإعدادات
-- HTTPS مطلوب للـTelegram webhook خارج localhost.
-- Tokens لا تُكتب داخل BOTS_JSON.
-- Terminal يبقى OFF افتراضياً.
-- Memory/backpressure limits باقية.
-- ZIP traversal/symlink/file count/size validation باقية.
-
-### 13. منع الوعد الكاذب بالـPersistence
-إذا TitanBox يعمل على Render والـstorage غير معلن كدائم، Admin bot يعرض تحذيراً بعد عمليات الملفات. Render Free لا يحفظ filesystem بعد restart/redeploy/spin-down.
-
-### 14. رفع ZIP ≠ تشغيل أي برنامج تلقائياً
-النسخة توضح هذا صراحة. المشروع المستقل يجب أن يكون مربوطاً بالـRunner أو مبنياً كـUltra Mode plugin.
+هذه تحتاج قرار بنية/مزود، مو كود يتظاهر أن القيود غير موجودة.

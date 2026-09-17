@@ -7,6 +7,8 @@ lint:
 	ruff check .
 
 check: lint test
+	python scripts/preflight_repo.py
+	python scripts/secret_scan.py
 	python -m compileall -q src tests examples
 	bash -n scripts/entrypoint.sh scripts/smoke_test.sh tests/chaos/manual_chaos.sh
 

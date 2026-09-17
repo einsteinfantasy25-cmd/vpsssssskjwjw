@@ -1,38 +1,41 @@
-# TitanBox v0.3 Troubleshooting
+# TitanBox v0.4 troubleshooting
 
-## `/start` says I am not authorized
-This is expected on first boot. The message includes your numeric Telegram ID. Put it into:
+## `/start` لا يرد
 
-```text
-DEPLOY_ADMIN_TELEGRAM_IDS=<your number>
-```
+Open `/status`. If `loaded_bots=0`, inspect the hidden details in Render logs. A common error is missing `DEPLOY_BOT_TOKEN`. If the bot is loaded but not ready, use `/diag` once Telegram replies and compare expected/actual webhook.
 
-in Render Environment and redeploy.
+## `/status` لا يعرض تفاصيل البوت
 
-## `/start` does not arrive at all
-Open `/status` and `/readyz`. Then use Render logs. Typical states:
+Expected. v0.4 hides public bot details by default. Use Telegram `/diag`, `/security`, Render logs, or temporarily set `PUBLIC_STATUS_DETAILS=true` only when you understand the exposure.
 
-- `missing environment secret DEPLOY_BOT_TOKEN` → BotFather token is missing.
-- webhook registration error → check token/network and `/diag` after authorization.
-- bot loaded but not ready → compare expected and actual webhook.
+## أمر حساس يقول `/auth 123456`
 
-## I don't know what the Render URL is for
-Open the root URL. v0.3 renders a human-readable TitanBox dashboard. `/setup` gives next steps.
+2FA is enabled. Enter the current code from your authenticator with `/auth CODE`, then repeat the command. `/lock` closes the session immediately.
 
-## Docker says the repository is incomplete
-v0.3 uses one build-context COPY and prints the missing mandatory paths. Your GitHub root must include `src/`, `config/`, `scripts/`, `nginx/`, `Dockerfile` and `render.yaml`.
+## `/security` يقول Audit غير متاحة/غير سليمة
 
-## `free -h` shows huge RAM
-Host totals do not equal your container limit. TitanBox `/healthz` and `/metrics` use cgroup-aware readings.
+Check `AUDIT_HMAC_KEY`, local write permissions, and Render logs. On Render Free the local audit file is ephemeral; platform logs are the secondary copy. For durable audit history, export logs/storage externally.
 
-## Uploaded files disappeared
-Expected on Render Free. Its local filesystem is ephemeral. Keep durable code in Git and durable files/data outside the container.
+## ZIP مرفوض
 
-## `/deploy` says Restarted: false
-The uploaded project is versioned/validated but not connected to Legacy Runner. Uploading arbitrary code does not automatically execute it. Configure Runner intentionally or adapt the bot to Ultra Mode.
+Do not bypass the validator. Fix the reported issue: unsafe path, duplicate normalized path, symlink, archive limits, invisible Unicode, malformed Python/JSON/TOML, or reserved manifest path.
 
-## AppRunner circuit opened
-The child application crashed too many times inside its restart window. Fix the underlying error, then start/restart it again.
+## Rollback مرفوض بسبب integrity
 
-## Out of memory
-Disable terminal, avoid duplicated bot processes, reduce concurrency/caches, stream files and move heavy AI/PDF/audio work off-box.
+The stored release changed after validation. Do not force it active. Deploy a known-good Git/release artifact instead.
+
+## ملفات `/deploy` اختفت
+
+Expected on Render Free after restart/redeploy/spin-down. Local filesystem is not durable. Keep durable code in Git and persistent data/files in external DB/object storage.
+
+## `CONTROL_PLANE_ONLY` يمنع إضافة Bot جديد
+
+Intentional. This service is Deploy Admin/control plane only. Create the student/public bot in a separate service/container for strong isolation.
+
+## Render deployment لا يبدأ بعد push
+
+v0.4 uses `autoDeployTrigger: checksPass`. Open GitHub Actions. Fix failing CI/security checks first; do not bypass them unless you intentionally switch to a manual emergency deployment.
+
+## Out of memory / slow runtime
+
+Use `/system`; reduce concurrency; keep terminal/runner off if unused; stream files; move AI/PDF/audio work out of the webhook process; separate public bots into independent services.

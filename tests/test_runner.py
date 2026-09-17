@@ -61,3 +61,16 @@ async def test_crash_loop_opens_circuit(tmp_path: Path):
     assert status["restart_count"] == 2
     assert status["last_exit_code"] == 3
     await runner.close()
+
+
+def test_runner_rejects_committed_secret_values(tmp_path: Path):
+    cfg = tmp_path / "apps.toml"
+    cfg.write_text(
+        '[[apps]]\n'
+        'name="unsafe"\n'
+        'command=["/bin/sh","-c","exit 0"]\n'
+        '[apps.env]\n'
+        'BOT_TOKEN="do-not-commit-this"\n'
+    )
+    with pytest.raises(ValueError, match="env_passthrough"):
+        load_specs(cfg)

@@ -3,21 +3,30 @@ from __future__ import annotations
 import asyncio
 import logging
 import shlex
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from titanbox.audit import AuditLog
 from titanbox.deploy import DeployError, DeployLimits, DeploymentManager
+from titanbox.security import TokenBucket, verify_totp
+from titanbox.system_metrics import memory_pressure_pct, snapshot
 
 log = logging.getLogger("titanbox.deploy_admin")
 
 
-HELP_TEXT = """TitanBox Deploy Admin 🚀
+HELP_TEXT = """TitanBox Deploy Admin 🛡️🚀
 
 هذا البوت مخصص للإدارة فقط.
 
-أوامر التشخيص:
-/whoami — يعرض Telegram numeric ID وحالة الصلاحية
-/diag — يفحص Bot token + Webhook + Pending updates
+الفحص والأمان:
+/whoami — Telegram numeric ID وحالة الصلاحية
+/diag — Token/Webhook/Pending updates
+/system — RAM/Uptime/Memory pressure
+/security — حالة 2FA/Audit/Storage
+/auth 123456 — فتح جلسة 2FA مؤقتة للأوامر الخطرة
+/lock — إغلاق جلسة 2FA فوراً
+/audit [N] — آخر عمليات الإدارة
 
 إدارة المشاريع:
 /projects — عرض المشاريع
@@ -25,8 +34,8 @@ HELP_TEXT = """TitanBox Deploy Admin 🚀
 /status [NAME] — حالة المشروع
 /files [NAME] [PREFIX] — عرض الملفات
 /releases [NAME] — عرض النسخ
-/restart [NAME] — إعادة تشغيل التطبيق إذا كان مربوطاً بالـRunner
-/rollback [NAME] [RELEASE] — رجوع للنسخة السابقة أو نسخة محددة
+/restart [NAME] — Restart إذا كان المشروع مربوطاً بالـRunner
+/rollback [NAME] [RELEASE] — رجوع لنسخة سابقة
 
 رفع مشروع كامل:
 أرسل ZIP واكتب في Caption:
@@ -38,13 +47,14 @@ HELP_TEXT = """TitanBox Deploy Admin 🚀
 
 الوضع الذكي:
 /use mybot
-بعدها إذا أرسلت ملفاً بدون Caption وكان له اسم فريد داخل المشروع، سيُستبدل تلقائياً داخل Release جديدة قابلة للـRollback.
+ثم أرسل ملفاً بلا Caption؛ إذا كان الاسم فريداً داخل المشروع يتم إنشاء Release جديدة قابلة للـRollback.
 """
 
 
 class DeployAdminPlugin:
     def __init__(self) -> None:
         self.manager: DeploymentManager | None = None
+        self.audit: AuditLog | None = None
         self.admin_ids: set[int] = set()
         self.max_upload_bytes = 0
         self.active_project: dict[int, str] = {}
@@ -53,6 +63,16 @@ class DeployAdminPlugin:
         self.public_base_url: str | None = None
         self.platform = "generic"
         self.storage_persistent = False
+        self.require_2fa = False
+        self.totp_secret: str | None = None
+        self.twofa_session_seconds = 300
+        self._auth_until: dict[int, float] = {}
+        self._last_totp_counter: dict[int, int] = {}
+        self._admin_limiters: dict[int, TokenBucket] = {}
+        self.admin_rate_per_minute = 60
+        self.admin_rate_burst = 15
+        self.control_plane_only = False
+        self.max_bots_per_runtime = 0
 
     def bind_services(self, services: "PluginServices") -> None:
         settings = services.settings
@@ -65,28 +85,95 @@ class DeployAdminPlugin:
             restart_timeout_seconds=float(settings.deploy_restart_timeout_seconds),
         )
         self.manager = DeploymentManager(settings.deploy_root, limits, runner=services.runner)
+        self.audit = AuditLog(settings.audit_log_path, settings.audit_hmac_key, settings.audit_max_bytes)
         self.admin_ids = settings.deploy_admin_ids()
         self.max_upload_bytes = settings.deploy_max_upload_bytes
         self.public_base_url = settings.public_base_url
         self.platform = settings.platform
         self.storage_persistent = settings.deploy_storage_persistent
+        self.require_2fa = settings.deploy_require_2fa
+        self.totp_secret = settings.deploy_totp_secret
+        self.twofa_session_seconds = settings.deploy_2fa_session_seconds
+        self.admin_rate_per_minute = settings.deploy_admin_rate_per_minute
+        self.admin_rate_burst = settings.deploy_admin_rate_burst
+        self.control_plane_only = settings.control_plane_only
+        self.max_bots_per_runtime = settings.max_bots_per_runtime
         self._op_slots = asyncio.Semaphore(settings.deploy_max_concurrent_ops)
 
-    def _spawn_operation(self, coroutine: Any, chat_id: int | str, bot: "BotContext") -> None:
-        task = asyncio.create_task(self._run_operation(coroutine, chat_id, bot), name="deploy-admin-operation")
+    def _limiter(self, user_id: int) -> TokenBucket:
+        limiter = self._admin_limiters.get(user_id)
+        if limiter is None:
+            limiter = TokenBucket(self.admin_rate_per_minute, self.admin_rate_burst)
+            self._admin_limiters[user_id] = limiter
+        return limiter
+
+    def _audit(
+        self,
+        action: str,
+        actor_id: int | None,
+        result: str,
+        *,
+        project: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        if self.audit is not None:
+            self.audit.append(action=action, actor_id=actor_id, result=result, project=project, detail=detail)
+
+    def _twofa_active(self, user_id: int) -> bool:
+        if not self.require_2fa:
+            return True
+        return time.monotonic() < self._auth_until.get(user_id, 0.0)
+
+    def _require_privileged(self, user_id: int) -> None:
+        if not self.require_2fa:
+            return
+        if not self.totp_secret:
+            raise DeployError(
+                "2FA مطلوب لكنه غير مضبوط. أضف DEPLOY_TOTP_SECRET في Render قبل تنفيذ أوامر التعديل."
+            )
+        if not self._twofa_active(user_id):
+            raise DeployError("هذا أمر حساس. افتح جلسة حماية أولاً: /auth 123456 ثم أعد الأمر.")
+
+    def _spawn_operation(
+        self,
+        coroutine: Any,
+        chat_id: int | str,
+        bot: "BotContext",
+        *,
+        actor_id: int,
+        action: str,
+        project: str | None = None,
+    ) -> None:
+        task = asyncio.create_task(
+            self._run_operation(coroutine, chat_id, bot, actor_id=actor_id, action=action, project=project),
+            name=f"deploy-admin:{action}",
+        )
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _run_operation(self, coroutine: Any, chat_id: int | str, bot: "BotContext") -> None:
+    async def _run_operation(
+        self,
+        coroutine: Any,
+        chat_id: int | str,
+        bot: "BotContext",
+        *,
+        actor_id: int,
+        action: str,
+        project: str | None,
+    ) -> None:
         try:
             async with self._op_slots:
                 await coroutine
+            self._audit(action, actor_id, "success", project=project)
         except DeployError as exc:
+            self._audit(action, actor_id, "denied_or_failed", project=project, detail={"error": str(exc)[:200]})
             await bot.send_message(chat_id, f"❌ {exc}")
         except asyncio.CancelledError:
+            self._audit(action, actor_id, "cancelled", project=project)
             raise
-        except Exception:
-            log.exception("unexpected background deployment failure")
+        except Exception as exc:
+            self._audit(action, actor_id, "error", project=project, detail={"type": type(exc).__name__})
+            log.exception("unexpected background deployment failure action=%s project=%s", action, project)
             await bot.send_message(chat_id, "❌ حدث خطأ داخلي أثناء العملية. لم يتم اعتماد تحديث غير مكتمل.")
 
     async def close(self) -> None:
@@ -99,20 +186,15 @@ class DeployAdminPlugin:
 
     @staticmethod
     def _actor(update: dict[str, Any]) -> tuple[int | None, int | str | None, dict[str, Any] | None]:
-        message = update.get("message") or update.get("edited_message")
-        if isinstance(message, dict):
-            sender = message.get("from") or {}
-            chat = message.get("chat") or {}
-            user_id = sender.get("id")
-            return (user_id if isinstance(user_id, int) else None, chat.get("id"), message)
-        callback = update.get("callback_query")
-        if isinstance(callback, dict):
-            sender = callback.get("from") or {}
-            msg = callback.get("message") or {}
-            chat = msg.get("chat") or {}
-            user_id = sender.get("id")
-            return (user_id if isinstance(user_id, int) else None, chat.get("id"), msg)
-        return None, None, None
+        # Administrative actions intentionally accept only fresh private messages. Edited
+        # messages/callbacks cannot mutate an old harmless message into a deployment command.
+        message = update.get("message")
+        if not isinstance(message, dict):
+            return None, None, None
+        sender = message.get("from") or {}
+        chat = message.get("chat") or {}
+        user_id = sender.get("id")
+        return (user_id if isinstance(user_id, int) else None, chat.get("id"), message)
 
     @staticmethod
     def _command_parts(text: str) -> list[str]:
@@ -160,10 +242,9 @@ class DeployAdminPlugin:
     async def _whoami(self, user_id: int, chat_id: int | str, bot: "BotContext") -> None:
         authorized = user_id in self.admin_ids
         status = "✅ مصرح" if authorized else "⛔ غير مصرح بعد"
-        text = (
-            f"Telegram numeric ID: `{user_id}`\n"
-            f"Status: {status}\n\n"
-        )
+        text = f"Telegram numeric ID: `{user_id}`\nStatus: {status}\n\n"
+        if authorized and self.require_2fa:
+            text += f"2FA session: {'✅ مفتوحة' if self._twofa_active(user_id) else '🔒 مقفلة'}\n"
         if not authorized:
             text += (
                 "حتى تفعل الإدارة: Render → Environment → "
@@ -190,9 +271,81 @@ class DeployAdminPlugin:
             f"Expected webhook: {expected}\n"
             f"Telegram webhook: {url} {match}\n"
             f"Pending updates: {pending}\n"
-            f"Last Telegram error: {last_error}"
+            f"Last Telegram error: {last_error}\n"
+            f"2FA: {'required' if self.require_2fa else 'optional/off'}"
             f"{self._persistence_warning()}",
         )
+
+    async def _system(self, chat_id: int | str, bot: "BotContext") -> None:
+        data = snapshot()
+        pressure = memory_pressure_pct()
+        limit = data.get("cgroup_memory_limit_bytes")
+        current = data.get("cgroup_memory_current_bytes")
+        await bot.send_message(
+            chat_id,
+            "🖥 TitanBox system\n"
+            f"Uptime: {int(float(data['uptime_seconds']))}s\n"
+            f"Process peak RSS: {int(data['process_peak_rss_bytes']) // (1024 * 1024)} MiB\n"
+            f"Container memory: {int(current) // (1024 * 1024) if isinstance(current, int) else '-'} / "
+            f"{int(limit) // (1024 * 1024) if isinstance(limit, int) else '-'} MiB\n"
+            f"Memory pressure: {f'{pressure:.1f}%' if pressure is not None else '-'}",
+        )
+
+    async def _security(self, user_id: int, chat_id: int | str, bot: "BotContext") -> None:
+        audit_ok = self.audit.verify() if self.audit else False
+        twofa_configured = bool(self.totp_secret)
+        await bot.send_message(
+            chat_id,
+            "🛡️ Security status\n"
+            f"Admin allowlist: ✅ ({len(self.admin_ids)} admin)\n"
+            f"2FA required: {'✅' if self.require_2fa else '⚠️ لا'}\n"
+            f"2FA secret configured: {'✅' if twofa_configured else '❌'}\n"
+            f"Current 2FA session: {'✅ مفتوحة' if self._twofa_active(user_id) else '🔒 مقفلة'}\n"
+            f"Audit chain: {'✅ سليمة' if audit_ok else '⚠️ غير متاحة/غير سليمة'}\n"
+            f"Persistent deploy storage: {'✅' if self.storage_persistent else '⚠️ لا'}\n"
+            f"Control-plane-only: {'✅' if self.control_plane_only else '⚠️ لا'}\n"
+            f"Max bots/runtime: {self.max_bots_per_runtime or 'unlimited'}\n"
+            "ملاحظة: العزل الأمني التام بين البوتات يحتاج Service/Container مستقل لكل Bot.",
+        )
+
+    async def _auth(self, user_id: int, chat_id: int | str, parts: list[str], bot: "BotContext") -> None:
+        if not self.require_2fa:
+            await bot.send_message(chat_id, "ℹ️ 2FA غير مفروض حالياً. فعّله من Render: DEPLOY_REQUIRE_2FA=true.")
+            return
+        if not self.totp_secret:
+            self._audit("2fa_auth", user_id, "misconfigured")
+            raise DeployError("DEPLOY_REQUIRE_2FA=true لكن DEPLOY_TOTP_SECRET غير موجود.")
+        if len(parts) != 2:
+            raise DeployError("الاستخدام: /auth 123456")
+        last = self._last_totp_counter.get(user_id)
+        counter = verify_totp(self.totp_secret, parts[1], last_counter=last)
+        if counter is None:
+            self._audit("2fa_auth", user_id, "failed")
+            await bot.send_message(chat_id, "❌ كود 2FA غير صحيح/منتهي أو مستخدم سابقاً.")
+            return
+        self._last_totp_counter[user_id] = counter
+        self._auth_until[user_id] = time.monotonic() + self.twofa_session_seconds
+        self._audit("2fa_auth", user_id, "success")
+        await bot.send_message(chat_id, f"🔓 تم فتح جلسة الأوامر الحساسة لمدة {self.twofa_session_seconds // 60} دقائق.")
+
+    async def _audit_tail(self, chat_id: int | str, parts: list[str], bot: "BotContext") -> None:
+        if self.audit is None:
+            await bot.send_message(chat_id, "Audit log غير متاح.")
+            return
+        limit = 10
+        if len(parts) >= 2:
+            try:
+                limit = min(max(1, int(parts[1])), 30)
+            except ValueError as exc:
+                raise DeployError("الاستخدام: /audit 10") from exc
+        records = self.audit.tail(limit)
+        lines = []
+        for item in records:
+            lines.append(
+                f"• {item.get('ts')} | {item.get('action')} | {item.get('result')} | "
+                f"admin={item.get('actor_id')} | project={item.get('project') or '-'} | mac={str(item.get('mac') or '')[:10]}"
+            )
+        await self._send_chunks(bot, chat_id, "🧾 Audit log:", lines or ["لا توجد عمليات مسجلة بعد."])
 
     async def _handle_command(
         self,
@@ -210,14 +363,33 @@ class DeployAdminPlugin:
         if command in {"/start", "/help"}:
             await bot.send_message(chat_id, HELP_TEXT + self._persistence_warning())
             return True
-
         if command == "/whoami":
             await self._whoami(user_id, chat_id, bot)
             return True
-
         if command == "/diag":
             await self._diag(user_id, chat_id, bot)
             return True
+        if command == "/system":
+            await self._system(chat_id, bot)
+            return True
+        if command == "/security":
+            await self._security(user_id, chat_id, bot)
+            return True
+        if command == "/auth":
+            await self._auth(user_id, chat_id, parts, bot)
+            return True
+        if command == "/lock":
+            self._auth_until.pop(user_id, None)
+            self._audit("2fa_lock", user_id, "success")
+            await bot.send_message(chat_id, "🔒 تم إغلاق جلسة الأوامر الحساسة.")
+            return True
+        if command == "/audit":
+            self._require_privileged(user_id)
+            await self._audit_tail(chat_id, parts, bot)
+            return True
+
+        if command in {"/projects", "/use", "/status", "/files", "/releases"}:
+            self._require_privileged(user_id)
 
         if command == "/projects":
             projects = self.manager.list_projects()
@@ -238,14 +410,14 @@ class DeployAdminPlugin:
 
         if command == "/status":
             project = self._pick_project(user_id, parts[1] if len(parts) >= 2 else None)
-            status = self.manager.status(project)
-            runner = status["runner"]
+            project_status = self.manager.status(project)
+            runner = project_status["runner"]
             runner_text = "غير مربوط بالـRunner"
             if isinstance(runner, dict):
                 runner_text = f"running={runner.get('running')} pid={runner.get('pid')} restarts={runner.get('restart_count')}"
             await bot.send_message(
                 chat_id,
-                f"📦 {project}\nCurrent: {status['current'] or '-'}\nReleases: {status['release_count']}\nRunner: {runner_text}",
+                f"📦 {project}\nCurrent: {project_status['current'] or '-'}\nReleases: {project_status['release_count']}\nRunner: {runner_text}",
             )
             return True
 
@@ -269,15 +441,31 @@ class DeployAdminPlugin:
             return True
 
         if command == "/rollback":
+            self._require_privileged(user_id)
             explicit_project = parts[1] if len(parts) >= 2 else None
             project = self._pick_project(user_id, explicit_project)
             release = parts[2] if len(parts) >= 3 else None
-            self._spawn_operation(self._do_rollback(project, release, chat_id, bot), chat_id, bot)
+            self._spawn_operation(
+                self._do_rollback(project, release, chat_id, bot),
+                chat_id,
+                bot,
+                actor_id=user_id,
+                action="rollback",
+                project=project,
+            )
             return True
 
         if command == "/restart":
+            self._require_privileged(user_id)
             project = self._pick_project(user_id, parts[1] if len(parts) >= 2 else None)
-            self._spawn_operation(self._do_restart(project, chat_id, bot), chat_id, bot)
+            self._spawn_operation(
+                self._do_restart(project, chat_id, bot),
+                chat_id,
+                bot,
+                actor_id=user_id,
+                action="restart",
+                project=project,
+            )
             return True
 
         return False
@@ -299,11 +487,7 @@ class DeployAdminPlugin:
         state = await self.manager.restart(project)
         await bot.send_message(chat_id, f"✅ {project} مستقر — pid={state.get('pid')}")
 
-    async def _download_document(
-        self,
-        document: dict[str, Any],
-        bot: "BotContext",
-    ) -> Path:
+    async def _download_document(self, document: dict[str, Any], bot: "BotContext") -> Path:
         assert self.manager is not None
         file_id = document.get("file_id")
         if not isinstance(file_id, str) or not file_id:
@@ -327,6 +511,7 @@ class DeployAdminPlugin:
         bot: "BotContext",
     ) -> None:
         assert self.manager is not None
+        self._require_privileged(user_id)
         document = message.get("document")
         if not isinstance(document, dict):
             return
@@ -346,8 +531,10 @@ class DeployAdminPlugin:
                 result = await self.manager.deploy_zip(project, temp)
             finally:
                 temp.unlink(missing_ok=True)
+            self._audit("deploy_zip", user_id, "success", project=project, detail={"release": result.release})
             run_note = (
-                "✅ التطبيق أُعيد تشغيله واستقر." if result.restarted
+                "✅ التطبيق أُعيد تشغيله واستقر."
+                if result.restarted
                 else "ℹ️ تم حفظ وفحص النسخة، لكنها غير مربوطة بالـRunner؛ رفع ZIP وحده لا يشغّل برنامجاً عشوائياً تلقائياً."
             )
             await bot.send_message(
@@ -370,6 +557,13 @@ class DeployAdminPlugin:
                 result = await self.manager.put_file(project, target, temp)
             finally:
                 temp.unlink(missing_ok=True)
+            self._audit(
+                "put_file",
+                user_id,
+                "success",
+                project=project,
+                detail={"path": target[:200], "release": result.release},
+            )
             run_note = "" if result.restarted else "\nℹ️ المشروع غير مربوط بالـRunner، لذلك تم تحديث الملفات فقط."
             await bot.send_message(
                 chat_id,
@@ -392,9 +586,17 @@ class DeployAdminPlugin:
                 result = await self.manager.put_file(project, target, temp)
             finally:
                 temp.unlink(missing_ok=True)
+            self._audit(
+                "smart_put_file",
+                user_id,
+                "success",
+                project=project,
+                detail={"path": target[:200], "release": result.release},
+            )
             await bot.send_message(
                 chat_id,
-                f"✅ تم تحديث {target}\nRelease: {result.release}\nPrevious: {result.previous_release or '-'}\nRestarted: {result.restarted}" + self._persistence_warning(),
+                f"✅ تم تحديث {target}\nRelease: {result.release}\nPrevious: {result.previous_release or '-'}\nRestarted: {result.restarted}"
+                + self._persistence_warning(),
             )
             return
 
@@ -416,6 +618,11 @@ class DeployAdminPlugin:
         user_id, chat_id, message = self._actor(update)
         if user_id is None or chat_id is None or message is None:
             return
+        chat = message.get("chat") or {}
+        chat_type = str(chat.get("type") or "")
+        if chat_type and chat_type != "private":
+            log.warning("ignored deploy admin message outside private chat user_id=%s chat_type=%s", user_id, chat_type)
+            return
         text = str(message.get("text") or "").strip()
         if user_id not in self.admin_ids:
             log.warning("rejected deployment bot access user_id=%s", user_id)
@@ -429,17 +636,30 @@ class DeployAdminPlugin:
                 )
             return
 
+        if not await self._limiter(user_id).allow():
+            await bot.send_message(chat_id, "⏳ أوامر الإدارة سريعة جداً. انتظر ثواني وحاول مرة ثانية.")
+            return
+
         try:
             if text.startswith("/") and await self._handle_command(user_id, chat_id, text, bot):
                 return
             if isinstance(message.get("document"), dict):
-                self._spawn_operation(self._handle_document(user_id, chat_id, message, bot), chat_id, bot)
+                self._spawn_operation(
+                    self._handle_document(user_id, chat_id, message, bot),
+                    chat_id,
+                    bot,
+                    actor_id=user_id,
+                    action="document_operation",
+                    project=self.active_project.get(user_id),
+                )
                 return
             if text:
                 await bot.send_message(chat_id, "استخدم /help لعرض أوامر الإدارة.")
         except DeployError as exc:
+            self._audit("command_denied", user_id, "denied", detail={"error": str(exc)[:200]})
             await bot.send_message(chat_id, f"❌ {exc}")
-        except Exception:
+        except Exception as exc:
+            self._audit("admin_internal_error", user_id, "error", detail={"type": type(exc).__name__})
             log.exception("unexpected deploy admin failure user_id=%s", user_id)
             await bot.send_message(chat_id, "❌ حدث خطأ داخلي أثناء العملية. لم يتم اعتماد تحديث غير مكتمل.")
 

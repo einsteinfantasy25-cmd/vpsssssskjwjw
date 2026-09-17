@@ -1,160 +1,142 @@
-# ابدأ من هنا — TitanBox v0.3.0 FINAL
+# ابدأ من هنا — TitanBox v0.4.0 HARDENED
 
-هذه النسخة صُممت لإصلاح المشاكل التي ظهرت فعلياً أثناء نشر v0.2 على Render.
+هذه النسخة هي تحديث أمني/احترافي للـDeploy Admin الذي عندك الآن. الهدف أن يبقى **بوت الإدارة Control Plane وحده** في هذه الخدمة، ولا نضع داخله بوتات الطلاب مستقبلاً.
 
-## أهم تغيير
+## 1) ماذا ترفع إلى GitHub؟
 
-على Render لا تحتاج في أول Deploy إلى إدخال `BOTS_JSON` أو `PUBLIC_BASE_URL` أو Telegram Admin ID.
+فك ملف ZIP وارفع **محتويات مجلد `TitanBox-0.4.0-HARDENED` نفسها** إلى جذر Repository.
 
-`render.yaml` يجهز Deploy Admin تلقائياً، وRender سيطلب منك قيمة سرية واحدة أساسية:
-
-```text
-DEPLOY_BOT_TOKEN
-```
-
-ضع Token الحقيقي الذي حصلت عليه من BotFather.
-
-## رفع المشروع إلى GitHub
-
-فك ZIP وارفع **محتويات مجلد TitanBox-0.3.0-FINAL كاملة** إلى جذر repository.
-
-الصفحة الرئيسية للـrepo يجب أن تعرض مباشرة:
-
-```text
-Dockerfile
-render.yaml
-requirements.txt
-src/
-config/
-scripts/
-nginx/
-```
-
-لا تجعلها بهذا الشكل:
-
-```text
-repo/
-  TitanBox-0.3.0-FINAL/
-    Dockerfile
-    src/
-```
-
-بل بهذا الشكل:
+الصحيح:
 
 ```text
 repo/
   Dockerfile
+  render.yaml
+  requirements.txt
   src/
   config/
   scripts/
-  nginx/
+  tests/
+  .github/
 ```
 
-## Render — أول تشغيل
-
-1. New → Blueprint.
-2. اختر GitHub repo.
-3. Render يقرأ `render.yaml`.
-4. عندما يطلب `DEPLOY_BOT_TOKEN`، ضع Token من BotFather.
-5. Apply/Deploy.
-
-TitanBox v0.3 يقرأ رابط الخدمة تلقائياً من متغير Render الرسمي `RENDER_EXTERNAL_URL`؛ لا تستخدم `placeholder.invalid`.
-
-## بعد نجاح Deploy
-
-افتح رابط Render. ستشاهد Dashboard بسيطة، وليست Terminal.
-
-افحص:
+الخطأ:
 
 ```text
-/
-/setup
-/status
-/healthz
-/readyz
+repo/
+  TitanBox-0.4.0-HARDENED/
+    Dockerfile
+    src/
 ```
 
-إذا `/healthz` = OK لكن `/readyz` = 503، افتح `/status`: سيخبرك بالضبط أي Bot فشل ولماذا.
+## 2) إذا Render عندك شغال أصلاً
 
-## أول /start في Telegram
+لا تحذف الخدمة ولا تنشئ Bot جديد للإدارة.
 
-افتح Deploy Admin Bot واضغط:
+1. استبدل ملفات GitHub بالنسخة الجديدة.
+2. Render → Blueprint/Service → Sync أو Manual Deploy → latest commit.
+3. لا تغيّر `DEPLOY_BOT_TOKEN` الحالي.
+4. لا تغيّر `DEPLOY_ADMIN_TELEGRAM_IDS` الحالي.
+5. بعد نجاح النشر افتح:
 
 ```text
-/start
+https://YOUR-SERVICE.onrender.com/status
 ```
 
-إذا لم تضف Admin ID بعد، البوت لن يسكت. سيرسل لك شيئاً مثل:
+يجب أن ترى:
 
 ```text
-Telegram numeric ID: 123456789
-Status: غير مصرح بعد
+"version": "0.4.0"
+"configured_bots": 1
+"loaded_bots": 1
+"bots_ready": true
 ```
 
-اذهب إلى Render → Service → Environment وأضف:
+تفاصيل البوتات نفسها مخفية من الصفحة العامة افتراضياً وهذا مقصود أمنياً.
 
-```text
-DEPLOY_ADMIN_TELEGRAM_IDS=123456789
-```
+## 3) افحص من Telegram
 
-ثم Save/Redeploy.
-
-بعدها أرسل:
+أرسل لبوت الإدارة:
 
 ```text
 /start
 /diag
+/security
+/system
 ```
 
-`/diag` يعرض Bot username، رابط Webhook الحالي، الرابط المتوقع، Pending updates وآخر خطأ Telegram.
+`/security` هو أهم أمر بعد التحديث.
 
-## ملفات ومشاريع
+## 4) العزل الذي فعّلناه
 
-بوت الإدارة يدعم:
+Render Blueprint الجديد يضع:
 
 ```text
-/projects
-/use NAME
-/status [NAME]
-/files [NAME]
-/releases [NAME]
-/rollback [NAME]
-/restart [NAME]
+CONTROL_PLANE_ONLY=true
+MAX_BOTS_PER_RUNTIME=1
 ```
 
-لرفع ZIP:
+هذا يمنعنا مستقبلاً من إضافة Medical Bot بالغلط إلى نفس Process مال Deploy Admin.
+
+**بوت الإدارة يبقى وحده.**
+
+البوت الطبي القوي لاحقاً يأخذ Service/Container مستقل.
+
+## 5) 2FA — اختياري أول يوم، موصى به قبل الإنتاج
+
+النسخة لا تجبرك عليه مباشرة حتى لا ينقفل عليك البوت أثناء الترقية.
+
+عندما تكون جاهزاً:
 
 ```text
-/deploy mybot
+DEPLOY_REQUIRE_2FA=true
+DEPLOY_TOTP_SECRET=<BASE32 SECRET>
 ```
 
-يكتب الأمر في Caption للـZIP.
-
-لتحديث ملف واحد:
+ثم الأوامر الحساسة تحتاج:
 
 ```text
-/put mybot path/to/file.py
+/auth 123456
 ```
 
-مهم: رفع ZIP إلى Deploy Admin لا يعني أن TitanBox سيشغّل أي كود مجهول تلقائياً. تشغيل مشروع مستقل يحتاج ربطه بالـRunner أو تحويله إلى Ultra Mode plugin.
+وتبقى الجلسة مفتوحة افتراضياً 5 دقائق ثم تنقفل.
 
-## مهم جداً: Render Free والملفات
+لا ترسل TOTP secret إلى Telegram ولا تضعه في GitHub.
 
-Render Free يستخدم filesystem مؤقتاً. أي ملف ترفعه أثناء التشغيل يمكن أن يختفي عند restart/redeploy/spin-down.
+راجع `docs/2FA_AR.md`.
+
+## 6) التخزين
+
+رفع ZIP أو ملف من Telegram ما زال يستخدم مساحة Render المحلية أثناء التشغيل. Render Free filesystem مؤقت.
 
 لذلك:
 
-- استخدم رفع الملفات على Render Free للاختبار فقط.
-- الكود الدائم اجعله في GitHub.
-- البيانات الدائمة اجعلها في database/object storage خارجي.
-- إذا أردت إدارة ملفات دائمة من Telegram، استخدم منصة فيها Volume/Persistent Disk أو نضيف backend خارجي لاحقاً.
+- GitHub = مصدر الكود الدائم.
+- External DB = بيانات المستخدمين الدائمة.
+- Object Storage = PDF/audio/images/backups الدائمة.
+- Render local = ملفات مؤقتة فقط.
 
-## فحص repository قبل Render
+هذا ليس Bug في TitanBox؛ هو حد في منصة الاستضافة.
 
-من terminal داخل المشروع:
+## 7) لا تستخدم حيلة داخلية لمنع Render من النوم
 
-```bash
-python scripts/preflight_repo.py
+Outbound ping من TitanBox إلى Telegram لا يمنع نوم Render. التصميم الصحيح يجعل الخدمة تستيقظ وتعيد Webhook وتسترجع بياناتها من المصادر الدائمة بدون فقدان شيء.
+
+## 8) إذا صار خطأ بعد الترقية
+
+افتح:
+
+```text
+/healthz
+/readyz
+/status
 ```
 
-إذا repo ناقص `src/` أو `config/` أو `scripts/` أو `nginx/` تحصل رسالة واضحة قبل Docker build.
+ومن Telegram:
+
+```text
+/diag
+/security
+```
+
+ثم Render Logs. لا ترسل أي Token في صورة أو رسالة.

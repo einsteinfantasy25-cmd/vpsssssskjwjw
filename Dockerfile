@@ -1,9 +1,6 @@
 # syntax=docker/dockerfile:1.7
 FROM python:3.12-slim-bookworm
 
-ARG TARGETARCH
-ARG TTYD_VERSION=1.7.7
-
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -11,41 +8,24 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOME=/home/app \
     PYTHONPATH=/app/src
 
+# Hardened default image: no SSH, VNC, browser terminal, nginx, tmux, editor, or Docker daemon.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash ca-certificates curl git gettext-base nano nginx-light procps tini tmux \
+      bash ca-certificates curl tini \
     && rm -rf /var/lib/apt/lists/*
-
-# Optional browser terminal. ttyd is always present but remains OFF unless ENABLE_TERMINAL=true.
-RUN set -eux; \
-    case "${TARGETARCH:-amd64}" in \
-      amd64) TTYD_ARCH=x86_64 ;; \
-      arm64) TTYD_ARCH=aarch64 ;; \
-      *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
-    BASE="https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}"; \
-    curl -fsSLo /tmp/ttyd "${BASE}/ttyd.${TTYD_ARCH}"; \
-    curl -fsSLo /tmp/SHA256SUMS "${BASE}/SHA256SUMS"; \
-    EXPECTED="$(awk -v f="ttyd.${TTYD_ARCH}" '$2==f {print $1}' /tmp/SHA256SUMS)"; \
-    test -n "$EXPECTED"; \
-    echo "$EXPECTED  /tmp/ttyd" | sha256sum -c -; \
-    install -m 0755 /tmp/ttyd /usr/local/bin/ttyd; \
-    rm -f /tmp/ttyd /tmp/SHA256SUMS
 
 RUN groupadd --gid 10001 app \
     && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash app \
-    && mkdir -p /app /workspace /tmp/nginx-client-body /tmp/nginx-proxy /tmp/nginx-fastcgi /tmp/nginx-uwsgi /tmp/nginx-scgi \
-    && chown -R app:app /app /workspace /tmp/nginx-*
+    && mkdir -p /app /workspace \
+    && chown -R app:app /app /workspace
 
 WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# One COPY avoids opaque Docker checksum errors when somebody accidentally uploads an incomplete repo.
-# The following RUN prints a human-readable list of missing mandatory paths instead.
 COPY --chown=app:app . /app
 RUN set -eu; \
     missing=""; \
-    for p in src/titanbox/main.py src/titanbox/settings.py scripts/entrypoint.sh config/apps.toml nginx/nginx.conf.template; do \
+    for p in src/titanbox/main.py src/titanbox/settings.py src/titanbox/security.py src/titanbox/audit.py src/titanbox/plugins/deploy_admin.py scripts/entrypoint.sh scripts/generate_totp.py config/apps.toml; do \
       if [ ! -e "/app/$p" ]; then missing="$missing $p"; fi; \
     done; \
     if [ -n "$missing" ]; then \
@@ -53,7 +33,7 @@ RUN set -eu; \
       echo "Upload the FULL project root to GitHub, not only the top-level files." >&2; \
       exit 64; \
     fi; \
-    chmod +x /app/scripts/*.sh; \
+    chmod +x /app/scripts/*.sh /app/scripts/generate_totp.py; \
     chown -R app:app /app /workspace
 
 USER app

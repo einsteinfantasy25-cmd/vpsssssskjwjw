@@ -1,80 +1,56 @@
-# Deploy Admin Bot — TitanBox v0.3
+# Deploy Admin Bot — TitanBox v0.4
 
-## أول تشغيل على Render
-
-`render.yaml` يضيف Deploy Admin تلقائياً. لا تحتاج كتابة `BOTS_JSON` يدوياً في أول Deploy.
-
-Render يطلب:
-
-```text
-DEPLOY_BOT_TOKEN
-```
-
-ضع Token الحقيقي من BotFather.
-
-TitanBox يشتق Webhook secret آمناً تلقائياً من `WEBHOOK_SECRET_KEY` الداخلي، ويكتشف رابط Render تلقائياً.
-
-## معرفة Telegram ID بدون مواقع خارجية
-
-أرسل:
+## أوامر الفحص
 
 ```text
 /start
-```
-
-إذا لم تكن مصرحاً، البوت يرد برقمك فقط وتعليمات التفعيل. بعد ذلك أضف داخل Render:
-
-```text
-DEPLOY_ADMIN_TELEGRAM_IDS=123456789
-```
-
-ثم Redeploy.
-
-## التشخيص
-
-```text
 /whoami
 /diag
+/system
+/security
+/help
 ```
 
-`/diag` يعرض username، Expected/Actual webhook، pending updates وآخر خطأ Telegram.
+## 2FA
 
-## أوامر الملفات
+إذا فعّلت `DEPLOY_REQUIRE_2FA=true` فالأوامر الحساسة تحتاج جلسة مؤقتة:
+
+```text
+/auth 123456
+/lock
+```
+
+راجع `2FA_AR.md`.
+
+## إدارة المشاريع
 
 ```text
 /projects
-/use mybot
-/status mybot
-/files mybot
-/releases mybot
-/rollback mybot
-/restart mybot
+/use NAME
+/status [NAME]
+/files [NAME] [PREFIX]
+/releases [NAME]
+/audit [N]
+/restart [NAME]
+/rollback [NAME] [RELEASE]
 ```
 
-رفع ZIP، Caption:
+لرفع ZIP، أرسل الملف وCaption:
 
 ```text
 /deploy mybot
 ```
 
-تحديث ملف واحد، Caption:
+لتحديث ملف واحد:
 
 ```text
 /put mybot path/to/file.py
 ```
 
-أو:
+أو `/use mybot` ثم أرسل ملفاً بلا Caption إذا كان اسمه فريداً داخل المشروع.
 
-```text
-/use mybot
-```
+## ما الذي يحدث عند Deploy؟
 
-ثم أرسل ملفاً بلا Caption؛ إذا كان اسمه فريداً في المشروع، TitanBox يحدد المسار تلقائياً.
+الملف ينزل Streaming تحت حد الحجم، ثم staging وفحص ZIP/path/symlink/Unicode/file-count/expanded-size، ثم Python/JSON/TOML validation، ثم SHA-256 release manifest، ثم atomic activation. Rollback يعيد التحقق من integrity قبل التفعيل.
 
-## ماذا يعني Deployment هنا؟
-
-TitanBox يعمل staging + validation + release + atomic current switch. **لا ينفذ أي ZIP عشوائي تلقائياً**. إذا كان المشروع مربوطاً باسم مماثل داخل Legacy Runner، يمكن إعادة تشغيله والتحقق من استقراره. وإلا تكون العملية إدارة ملفات/نسخ فقط.
-
-## Render Free
-
-رفع الملفات محلياً على Render Free ليس تخزيناً دائماً. التغييرات يمكن أن تختفي عند restart/redeploy/spin-down. احتفظ بالكود الحقيقي في GitHub أو استخدم تخزيناً/Volume دائماً على منصة مناسبة.
+رفع ZIP **لا يعني تشغيل كود عشوائي تلقائياً**. تشغيل تطبيق مستقل يحتاج Runtime/Runner مقصوداً، وللعزل القوي يفضّل Service/Container مستقل.

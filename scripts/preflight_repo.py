@@ -13,8 +13,12 @@ REQUIRED = [
     "src/titanbox/main.py",
     "src/titanbox/settings.py",
     "src/titanbox/telegram.py",
+    "src/titanbox/security.py",
+    "src/titanbox/audit.py",
     "src/titanbox/plugins/deploy_admin.py",
     "scripts/entrypoint.sh",
+    "scripts/generate_totp.py",
+    "scripts/secret_scan.py",
     "config/apps.toml",
     "nginx/nginx.conf.template",
 ]

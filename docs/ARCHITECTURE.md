@@ -1,31 +1,39 @@
-# TitanBox architecture
+# TitanBox v0.4 architecture
 
-TitanBox is intentionally not a fake VPS. It is a lightweight Linux container runtime designed for PaaS platforms.
+TitanBox is a lightweight PaaS control plane/runtime, **not a VPS and not a container escape mechanism**.
 
-## Fast path: Ultra Mode
+## Recommended production shape
 
-Telegram -> HTTPS webhook -> one FastAPI process -> shared HTTP client -> plugin routers -> external DB / AI / object storage.
+```text
+Telegram Admin
+     |
+     v
+TitanBox Control Plane (service/container A)
+     |
+     +--> deployment metadata / monitoring / releases
 
-Three or twenty low-traffic bots can share one process. Each bot has a separate token and Telegram webhook secret, but shares the event loop, HTTP connection pool and Python libraries.
+Public Bot A (service/container B) --> external DB / object storage / AI
+Public Bot B (service/container C) --> external DB / object storage / AI
+```
 
-## Compatibility path: Legacy Runner
+The Render Blueprint in this release sets `CONTROL_PLANE_ONLY=true` and `MAX_BOTS_PER_RUNTIME=1`, so the existing service is reserved for Deploy Admin. That guard prevents accidentally adding a student/public plugin to the same Python process.
 
-Existing bot scripts can run as child processes from `config/apps.toml`. The runner provides:
+## Ultra Mode
 
-- graceful termination and process-group cleanup
-- exponential backoff with jitter
-- crash-loop circuit breaker
-- bounded file descriptors
-- reduced scheduling priority (`nice`)
-- secret allow-listing with `env_passthrough`
-- stdout/stderr streaming without an in-memory log cache
+Ultra Mode can run multiple trusted, low-traffic plugins in one FastAPI process with one event loop and shared HTTP pools. It is memory-efficient, but **process sharing is not a hard security boundary**. A plugin bug can affect the shared process.
 
-Use this only when adapting a bot to Ultra Mode is impractical, because every Python child has its own interpreter and library memory.
+Use Ultra Mode only where shared-process trust is acceptable. For strong isolation, use separate services/containers and separate secrets/database roles/storage namespaces.
 
-## Optional browser terminal
+## Legacy Runner
 
-`ENABLE_TERMINAL=true` activates ttyd behind nginx at `/terminal/`. It is off by default. No SSH daemon or desktop environment is installed.
+Legacy scripts can be child processes. The runner provides restart backoff, crash-loop protection, file descriptor limits, optional best-effort address-space/file-size limits, reduced priority, and explicit `env_passthrough` secrets.
+
+A child process in the same container is still not equivalent to a separate container/security domain.
 
 ## Persistence
 
-Treat the local filesystem as disposable. On Render Free it is explicitly ephemeral. Store real data in an external database/object store. Railway volumes can persist data, but TitanBox itself does not require a volume.
+Local runtime storage must be treated as disposable unless the host provides a persistent volume. Durable code belongs in Git; durable user data belongs in an external database; durable files/backups belong in object storage.
+
+## Heavy work
+
+Webhook handlers should be short. CPU/RAM-heavy PDF, audio, transcription, OCR, LLM, or video work should use an external worker/service/queue instead of blocking the control plane.

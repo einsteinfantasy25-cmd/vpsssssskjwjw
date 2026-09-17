@@ -1,123 +1,52 @@
-# ترقية Render الحالي من TitanBox v0.2 إلى v0.3
+# ترقية خدمتك الحالية من v0.3 إلى v0.4
 
-هذا الملف لك إذا **الخدمة موجودة أصلاً على Render** ولا تريد إنشاء Service جديدة.
+أنت لا تحتاج BotFather جديد ولا Render Service جديد.
 
-## 1) GitHub
-
-استبدل محتويات الـrepo القديم بمحتويات v0.3 كاملة. تأكد أن جذر repo يظهر:
+## احتفظ بهذه القيم الحالية كما هي
 
 ```text
-Dockerfile
-render.yaml
-requirements.txt
-src/
-config/
-scripts/
-nginx/
+DEPLOY_BOT_TOKEN
+DEPLOY_ADMIN_TELEGRAM_IDS
 ```
 
-## 2) Render Blueprint
+ولا تشارك قيمتها مع أحد.
 
-اعمل Manual Sync للـBlueprint أو انتظر Auto Sync بعد commit.
+## الخطوات
 
-`render.yaml` الجديد سيصحح تلقائياً:
+1. خذ نسخة من Repository الحالي أو أنشئ Branch احتياطية.
+2. استبدل محتويات Repository بمحتويات v0.4 كاملة.
+3. Commit + Push.
+4. Render → Sync Blueprint إن كانت الخدمة مربوطة Blueprint.
+5. Deploy latest commit.
+6. انتظر حتى `/healthz` يعطي 200.
+7. افتح `/status` وتأكد أن version = `0.4.0` و `bots_ready=true`.
+8. Telegram → `/diag` ثم `/security`.
+
+## متغيرات v0.4 الجديدة
+
+الـ`render.yaml` الجديد يضبط افتراضياً:
 
 ```text
-BOTS_JSON = Deploy Admin descriptor
-AUTO_REGISTER_WEBHOOKS = true
-ENABLE_TERMINAL = false
-ENABLE_RUNNER = false
+CONTROL_PLANE_ONLY=true
+MAX_BOTS_PER_RUNTIME=1
+ADMIN_API_ENABLED=false
+PUBLIC_STATUS_DETAILS=false
+METRICS_PUBLIC=false
+WEBHOOK_WATCHDOG_ENABLED=true
+WEBHOOK_MAX_BODY_BYTES=1000000
+DEPLOY_REQUIRE_2FA=false
 ```
 
-## 3) مهم: DEPLOY_BOT_TOKEN
+ويطلب/ينشئ الأسرار المناسبة للـWebhook/Admin/Audit عند إنشاء Blueprint. في خدمة قديمة قد تحتاج Blueprint Sync حتى تدخل القيم الجديدة.
 
-لأن الخدمة قديمة، لا تعتمد على أن Render سيطلب منك `sync: false` من جديد.
+إذا `AUDIT_HMAC_KEY` لم يظهر عندك، أضف قيمة عشوائية طويلة في Render Environment. لا تضعها في GitHub.
 
-اذهب يدوياً:
+## 2FA
 
-```text
-Render → titanbox service → Environment
-```
+خلي `DEPLOY_REQUIRE_2FA=false` أثناء أول Upgrade فقط حتى تتأكد أن كل شيء يعمل. بعدها جهّز TOTP secret وفعّله إذا تريد حماية الأوامر الخطرة حتى لو انسرق حساب Telegram.
 
-وتأكد أن عندك:
+## Rollback إذا التحديث نفسه فشل
 
-```text
-DEPLOY_BOT_TOKEN=<BotFather token الحقيقي>
-```
+إذا فشل Docker build قبل نشر v0.4، Render يبقي آخر Deploy ناجح عادةً؛ ارجع GitHub commit السابق ثم Deploy.
 
-إذا غير موجود، أضفه ثم Save.
-
-## 4) القيم القديمة
-
-إذا بقي عندك:
-
-```text
-PUBLIC_BASE_URL=https://placeholder.invalid
-DEPLOY_ADMIN_TELEGRAM_IDS=0
-DEPLOY_BOT_SECRET=...
-```
-
-v0.3 لن يعتمد عليها بالشكل القديم:
-
-- placeholder القديم يتم تجاهله ويُستخدم رابط Render الحقيقي تلقائياً.
-- Admin ID = 0 يعتبر غير مضبوط.
-- `DEPLOY_BOT_SECRET` القديم غير مطلوب إذا كنت تستخدم الـBlueprint النهائي؛ TitanBox يشتق secret مناسباً من `WEBHOOK_SECRET_KEY`.
-
-يمكن حذف القيم القديمة بعد نجاح الترقية لتقليل الالتباس.
-
-## 5) Deploy
-
-شغّل:
-
-```text
-Manual Deploy → Deploy latest commit
-```
-
-ثم افتح رابط Render الرئيسي.
-
-يجب أن تشاهد Dashboard TitanBox v0.3.
-
-## 6) افحص
-
-افتح:
-
-```text
-/healthz
-/status
-/readyz
-```
-
-المطلوب:
-
-- `/healthz` → 200.
-- `/status` → configured_bots=1 وبدون token leak.
-- `/readyz` → 200 إذا Telegram webhook نجح.
-
-إذا `/readyz` = 503، السبب مكتوب داخل `/status` بدلاً من التخمين.
-
-## 7) Telegram Admin ID
-
-أرسل للبوت:
-
-```text
-/start
-```
-
-إذا Admin ID غير مضبوط، سيعطيك رقمك بنفسه.
-
-ضع داخل Render:
-
-```text
-DEPLOY_ADMIN_TELEGRAM_IDS=<الرقم>
-```
-
-ثم Save/Redeploy.
-
-بعدها:
-
-```text
-/start
-/diag
-```
-
-إذا `/diag` يبين Expected webhook = Telegram webhook، الربط اكتمل.
+إذا v0.4 بدأ لكن Bot لم يصبح Ready، لا تغيّر الكود مباشرة. افحص `/status`, Render Logs و`/diag` إن كان البوت يرد.

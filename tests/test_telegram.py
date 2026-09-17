@@ -224,3 +224,119 @@ async def test_invalid_token_error_never_leaks_token(monkeypatch):
         assert not hub.all_ready()
     finally:
         await hub.close()
+
+
+def test_webhook_body_size_limit(monkeypatch):
+    monkeypatch.setenv("BOT_LIMIT_TOKEN", "3:ghi")
+    monkeypatch.setenv("BOT_LIMIT_SECRET", "Limit_secret_123")
+    monkeypatch.setenv("WEBHOOK_MAX_BODY_BYTES", "4096")
+    monkeypatch.setenv("BOTS_JSON", json.dumps([{
+        "name": "limit",
+        "token_env": "BOT_LIMIT_TOKEN",
+        "secret_env": "BOT_LIMIT_SECRET",
+        "plugin": "titanbox.plugins.default:DefaultPlugin",
+    }]))
+    settings = Settings.from_env()
+    hub = TelegramHub(settings)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        await hub.start()
+        try:
+            yield
+        finally:
+            await hub.close()
+
+    app = FastAPI(lifespan=lifespan)
+
+    @app.post("/telegram/{name}")
+    async def hook(name: str, request: Request):
+        return await hub.handle(name, request)
+
+    headers = {"X-Telegram-Bot-Api-Secret-Token": "Limit_secret_123", "content-type": "application/json"}
+    body = b'{"update_id":1,"padding":"' + (b"x" * 5000) + b'"}'
+    with TestClient(app) as client:
+        response = client.post("/telegram/limit", headers=headers, content=body)
+        assert response.status_code == 413
+
+
+def test_per_bot_rate_limit_contains_noisy_bot(monkeypatch):
+    class NoopPlugin:
+        async def handle(self, update, bot):
+            return None
+
+    monkeypatch.setenv("BOT_RATE_TOKEN", "4:jkl")
+    monkeypatch.setenv("BOT_RATE_SECRET", "Rate_secret_123")
+    monkeypatch.setenv("BOTS_JSON", json.dumps([{
+        "name": "rate",
+        "token_env": "BOT_RATE_TOKEN",
+        "secret_env": "BOT_RATE_SECRET",
+        "plugin": "titanbox.plugins.default:DefaultPlugin",
+        "limits": {"rate_per_minute": 10, "burst": 1},
+    }]))
+    settings = Settings.from_env()
+    hub = TelegramHub(settings)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        await hub.start()
+        hub.plugins["rate"] = NoopPlugin()
+        try:
+            yield
+        finally:
+            await hub.close()
+
+    app = FastAPI(lifespan=lifespan)
+
+    @app.post("/telegram/{name}")
+    async def hook(name: str, request: Request):
+        return await hub.handle(name, request)
+
+    headers = {"X-Telegram-Bot-Api-Secret-Token": "Rate_secret_123"}
+    with TestClient(app) as client:
+        assert client.post("/telegram/rate", headers=headers, json={"update_id": 1}).status_code == 200
+        assert client.post("/telegram/rate", headers=headers, json={"update_id": 2}).status_code == 429
+
+
+def test_inflight_duplicate_is_not_acknowledged_as_success(monkeypatch):
+    class InflightDedup:
+        async def begin(self, update_id):
+            return "inflight"
+
+        async def complete(self, update_id):
+            raise AssertionError("should not complete inflight duplicate")
+
+        async def fail(self, update_id):
+            raise AssertionError("should not mutate original inflight state")
+
+    monkeypatch.setenv("BOT_INFLIGHT_TOKEN", "5:mno")
+    monkeypatch.setenv("BOT_INFLIGHT_SECRET", "Inflight_secret_123")
+    monkeypatch.setenv("BOTS_JSON", json.dumps([{
+        "name": "inflight",
+        "token_env": "BOT_INFLIGHT_TOKEN",
+        "secret_env": "BOT_INFLIGHT_SECRET",
+        "plugin": "titanbox.plugins.default:DefaultPlugin",
+    }]))
+    settings = Settings.from_env()
+    hub = TelegramHub(settings)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        await hub.start()
+        hub.dedup["inflight"] = InflightDedup()
+        try:
+            yield
+        finally:
+            await hub.close()
+
+    app = FastAPI(lifespan=lifespan)
+
+    @app.post("/telegram/{name}")
+    async def hook(name: str, request: Request):
+        return await hub.handle(name, request)
+
+    headers = {"X-Telegram-Bot-Api-Secret-Token": "Inflight_secret_123"}
+    with TestClient(app) as client:
+        response = client.post("/telegram/inflight", headers=headers, json={"update_id": 7})
+        assert response.status_code == 503
+        assert response.headers["retry-after"] == "1"

@@ -1,5 +1,6 @@
 # Legacy Runner examples. Disabled by default.
-# Prefer the shared Telegram Hub for your own bots because it uses much less RAM.
+# For hard security isolation use a separate service/container, not only a child process.
+# Never store tokens/passwords inside this file; use env_passthrough.
 
 [[apps]]
 name = "dummy-worker"
@@ -11,6 +12,9 @@ restart_window_seconds = 300
 backoff_base_seconds = 1.0
 backoff_max_seconds = 30.0
 max_open_files = 256
+# Optional best-effort Linux limits. 0 means disabled.
+max_memory_mb = 0
+max_file_bytes = 0
 nice = 5
 
 # Example for an existing bot copied into /app/legacy/mybot:
@@ -25,5 +29,7 @@ nice = 5
 # backoff_base_seconds = 1.0
 # backoff_max_seconds = 60.0
 # max_open_files = 512
+# max_memory_mb = 192
+# max_file_bytes = 100000000
 # nice = 5
 # env_passthrough = ["OLD_BOT_TOKEN", "DATABASE_URL"]

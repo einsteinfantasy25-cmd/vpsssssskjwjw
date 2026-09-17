@@ -29,6 +29,8 @@ class AppSpec:
     backoff_base_seconds: float = 1.0
     backoff_max_seconds: float = 30.0
     max_open_files: int = 512
+    max_memory_mb: int = 0
+    max_file_bytes: int = 0
     nice: int = 5
     env_passthrough: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
@@ -45,6 +47,16 @@ class AppSpec:
         name = str(raw.get("name", "")).strip()
         if not name or not name.replace("-", "").replace("_", "").isalnum():
             raise ValueError(f"invalid app name: {name!r}")
+        env_passthrough = [str(x) for x in raw.get("env_passthrough", [])]
+        static_env = {str(k): str(v) for k, v in raw.get("env", {}).items()}
+        secret_hints = ("TOKEN", "SECRET", "PASSWORD", "PRIVATE_KEY", "API_KEY")
+        unsafe_keys = [key for key, value in static_env.items() if value and any(h in key.upper() for h in secret_hints)]
+        if unsafe_keys:
+            raise ValueError(
+                "apps.toml must not contain static secret values for: "
+                + ", ".join(sorted(unsafe_keys))
+                + "; put them in platform Environment and list their names in env_passthrough"
+            )
         return cls(
             name=name,
             command=cmd,
@@ -56,9 +68,11 @@ class AppSpec:
             backoff_base_seconds=max(0.1, float(raw.get("backoff_base_seconds", 1.0))),
             backoff_max_seconds=max(0.1, float(raw.get("backoff_max_seconds", 30.0))),
             max_open_files=max(64, int(raw.get("max_open_files", 512))),
+            max_memory_mb=max(0, int(raw.get("max_memory_mb", 0))),
+            max_file_bytes=max(0, int(raw.get("max_file_bytes", 0))),
             nice=max(0, min(19, int(raw.get("nice", 5)))),
-            env_passthrough=[str(x) for x in raw.get("env_passthrough", [])],
-            env={str(k): str(v) for k, v in raw.get("env", {}).items()},
+            env_passthrough=env_passthrough,
+            env=static_env,
         )
 
 
@@ -115,6 +129,17 @@ def _apply_post_spawn_limits(pid: int, spec: AppSpec) -> None:
         resource.prlimit(pid, resource.RLIMIT_NOFILE, (limit, limit))
     except (AttributeError, OSError, PermissionError):
         pass
+    if spec.max_memory_mb > 0:
+        try:
+            limit = spec.max_memory_mb * 1024 * 1024
+            resource.prlimit(pid, resource.RLIMIT_AS, (limit, limit))
+        except (AttributeError, OSError, PermissionError, ValueError):
+            pass
+    if spec.max_file_bytes > 0:
+        try:
+            resource.prlimit(pid, resource.RLIMIT_FSIZE, (spec.max_file_bytes, spec.max_file_bytes))
+        except (AttributeError, OSError, PermissionError, ValueError):
+            pass
     try:
         os.setpriority(os.PRIO_PROCESS, pid, spec.nice)
     except (AttributeError, OSError, PermissionError):

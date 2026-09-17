@@ -80,3 +80,45 @@ def test_render_first_boot_does_not_require_public_base_url_or_admin_id(monkeypa
     s.validate()
     assert s.public_base_url == "https://titanbox-first.onrender.com"
     assert s.deploy_admin_ids() == set()
+
+
+def test_admin_api_requires_token_when_enabled(monkeypatch):
+    monkeypatch.setenv("BOTS_JSON", "[]")
+    monkeypatch.setenv("ADMIN_API_ENABLED", "true")
+    monkeypatch.delenv("ADMIN_TOKEN", raising=False)
+    s = Settings.from_env()
+    with pytest.raises(ValueError, match="ADMIN_TOKEN"):
+        s.validate()
+
+
+def test_invalid_totp_secret_is_rejected(monkeypatch):
+    monkeypatch.setenv("BOTS_JSON", "[]")
+    monkeypatch.setenv("DEPLOY_TOTP_SECRET", "not-base32!!!!")
+    s = Settings.from_env()
+    with pytest.raises(ValueError, match="Base32"):
+        s.validate()
+
+
+def test_control_plane_only_rejects_public_bot_plugin(monkeypatch):
+    monkeypatch.setenv("CONTROL_PLANE_ONLY", "true")
+    monkeypatch.setenv("MAX_BOTS_PER_RUNTIME", "1")
+    monkeypatch.setenv(
+        "BOTS_JSON",
+        '[{"name":"student","token_env":"STUDENT_TOKEN","plugin":"titanbox.plugins.default:DefaultPlugin"}]',
+    )
+    s = Settings.from_env()
+    with pytest.raises(ValueError, match="CONTROL_PLANE_ONLY"):
+        s.validate()
+
+
+def test_max_bots_per_runtime_enforces_isolation_limit(monkeypatch):
+    monkeypatch.setenv("CONTROL_PLANE_ONLY", "false")
+    monkeypatch.setenv("MAX_BOTS_PER_RUNTIME", "1")
+    monkeypatch.setenv(
+        "BOTS_JSON",
+        '[{"name":"a","token_env":"A","plugin":"titanbox.plugins.default:DefaultPlugin"},'
+        '{"name":"b","token_env":"B","plugin":"titanbox.plugins.default:DefaultPlugin"}]',
+    )
+    s = Settings.from_env()
+    with pytest.raises(ValueError, match="MAX_BOTS_PER_RUNTIME"):
+        s.validate()

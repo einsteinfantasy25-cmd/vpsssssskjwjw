@@ -23,7 +23,7 @@ def test_render_blueprint_is_free_tier_safe_and_bootstrapped():
     text = ROOT.joinpath("render.yaml").read_text()
     assert "plan: free" in text
     assert "maxShutdownDelaySeconds" not in text
-    assert "autoDeployTrigger: commit" in text
+    assert "autoDeployTrigger: checksPass" in text
     assert 'key: AUTO_REGISTER_WEBHOOKS' in text
     assert 'value: "true"' in text
     assert "deploy-admin" in text

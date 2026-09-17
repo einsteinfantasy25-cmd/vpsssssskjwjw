@@ -10,12 +10,21 @@ import stat
 import tempfile
 import time
 import tomllib
+import unicodedata
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 PROJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+MANIFEST_NAME = ".titanbox-release.json"
+
+
+def hmac_compare_digest(left: str, right: str) -> bool:
+    # hashlib output is public integrity metadata, but constant-time comparison is cheap.
+    import hmac
+
+    return hmac.compare_digest(left.encode("ascii", "ignore"), right.encode("ascii", "ignore"))
 
 
 class DeployError(RuntimeError):
@@ -93,6 +102,8 @@ class DeploymentManager:
         value = raw.strip().replace("\\", "/")
         if not value or "\x00" in value or len(value) > 240:
             raise DeployError("Invalid target path.")
+        if any(unicodedata.category(ch) in {"Cc", "Cf"} for ch in value):
+            raise DeployError("Target path contains invisible/control Unicode characters.")
         if value.startswith("./") or "//" in value:
             raise DeployError("Target path contains an ambiguous path segment.")
         path = PurePosixPath(value)
@@ -107,9 +118,9 @@ class DeploymentManager:
         name = Path(raw).name
         if name in {"", ".", ".."} or len(name) > 180:
             raise DeployError("Invalid filename.")
-        if any(ord(ch) < 32 for ch in name):
-            raise DeployError("Filename contains control characters.")
-        return name
+        if any(unicodedata.category(ch) in {"Cc", "Cf"} for ch in name):
+            raise DeployError("Filename contains invisible/control characters.")
+        return unicodedata.normalize("NFC", name)
 
     def project_dir(self, project: str) -> Path:
         return self.projects_root / self.validate_project_name(project)
@@ -161,6 +172,8 @@ class DeploymentManager:
             if not path.is_file():
                 continue
             rel = path.relative_to(current).as_posix()
+            if rel == MANIFEST_NAME:
+                continue
             if prefix_norm and not rel.startswith(prefix_norm):
                 continue
             results.append(rel)
@@ -214,27 +227,24 @@ class DeploymentManager:
         suffix = hashlib.sha256(entropy).hexdigest()[:8]
         return f"{stamp}-{suffix}"
 
-    @staticmethod
-    def _copy_with_hardlink(src: str, dst: str) -> str:
-        try:
-            os.link(src, dst)
-            return dst
-        except OSError:
-            return shutil.copy2(src, dst)
-
     def _clone_release(self, source: Path, destination: Path) -> None:
+        # Do not hard-link files across releases. Hard links save disk, but a running process
+        # that modifies one inode in place could silently corrupt multiple rollback points.
+        # Independent copies preserve release immutability and make integrity manifests useful.
         shutil.copytree(
             source,
             destination,
             symlinks=True,
-            copy_function=self._copy_with_hardlink,
+            copy_function=shutil.copy2,
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache"),
         )
 
     def _zip_member_path(self, name: str) -> PurePosixPath:
         if not name or "\x00" in name:
             raise DeployError("Archive contains an invalid path.")
-        normalized = name.replace("\\", "/")
+        if any(unicodedata.category(ch) in {"Cc", "Cf"} for ch in name):
+            raise DeployError("Archive path contains invisible/control Unicode characters.")
+        normalized = unicodedata.normalize("NFC", name).replace("\\", "/")
         if normalized.startswith("./") or "//" in normalized:
             raise DeployError(f"Unsafe archive path: {name!r}")
         path = PurePosixPath(normalized)
@@ -259,8 +269,18 @@ class DeploymentManager:
                 raise DeployError("Archive expands beyond the configured safety limit.")
 
             members: list[tuple[zipfile.ZipInfo, PurePosixPath]] = []
+            normalized_paths: set[str] = set()
             for info in infos:
-                rel = self._zip_member_path(info.filename.rstrip("/")) if not info.is_dir() else self._zip_member_path(info.filename.rstrip("/"))
+                rel = self._zip_member_path(info.filename.rstrip("/"))
+                rel_text = rel.as_posix()
+                if rel_text == MANIFEST_NAME:
+                    raise DeployError("Archive contains a reserved TitanBox release manifest path.")
+                # Reject duplicate paths after separator/Unicode normalization. ZIP files can
+                # legally contain duplicate names; accepting them makes the final content depend
+                # on extraction order and can hide what an administrator thinks was deployed.
+                if rel_text in normalized_paths:
+                    raise DeployError(f"Archive contains a duplicate normalized path: {rel_text}")
+                normalized_paths.add(rel_text)
                 mode = (info.external_attr >> 16) & 0o170000
                 if mode == stat.S_IFLNK:
                     raise DeployError("Archive symlinks are not allowed.")
@@ -309,10 +329,24 @@ class DeploymentManager:
         temp.rename(destination)
 
     @staticmethod
+    def _file_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
     def _tree_digest(root: Path) -> str:
         digest = hashlib.sha256()
         for path in sorted(p for p in root.rglob("*") if p.is_file()):
-            rel = path.relative_to(root).as_posix().encode("utf-8")
+            rel_text = path.relative_to(root).as_posix()
+            if rel_text == MANIFEST_NAME:
+                continue
+            rel = rel_text.encode("utf-8")
             digest.update(len(rel).to_bytes(4, "big"))
             digest.update(rel)
             with path.open("rb") as handle:
@@ -322,6 +356,63 @@ class DeploymentManager:
                         break
                     digest.update(chunk)
         return digest.hexdigest()
+
+    def _write_manifest(self, root: Path) -> str:
+        files: dict[str, dict[str, Any]] = {}
+        for path in sorted(p for p in root.rglob("*") if p.is_file()):
+            rel = path.relative_to(root).as_posix()
+            if rel == MANIFEST_NAME:
+                continue
+            files[rel] = {"size": path.stat().st_size, "sha256": self._file_sha256(path)}
+        tree_sha256 = self._tree_digest(root)
+        payload = {
+            "format": 1,
+            "created_at": int(time.time()),
+            "tree_sha256": tree_sha256,
+            "files": files,
+        }
+        target = root / MANIFEST_NAME
+        temp = root / f"{MANIFEST_NAME}.tmp-{os.getpid()}-{time.time_ns()}"
+        temp.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+        os.replace(temp, target)
+        target.chmod(0o440)
+        return tree_sha256
+
+    def _verify_manifest(self, root: Path) -> str:
+        target = root / MANIFEST_NAME
+        if not target.is_file():
+            raise DeployError("Release integrity manifest is missing.")
+        try:
+            payload = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DeployError("Release integrity manifest is unreadable.") from exc
+        if payload.get("format") != 1 or not isinstance(payload.get("files"), dict):
+            raise DeployError("Release integrity manifest format is invalid.")
+        expected_tree = str(payload.get("tree_sha256") or "")
+        actual_tree = self._tree_digest(root)
+        if not hmac_compare_digest(expected_tree, actual_tree):
+            raise DeployError("Release integrity check failed: tree digest mismatch.")
+        expected_files = payload["files"]
+        actual_paths = {
+            p.relative_to(root).as_posix(): p
+            for p in root.rglob("*")
+            if p.is_file() and p.relative_to(root).as_posix() != MANIFEST_NAME
+        }
+        if set(actual_paths) != set(expected_files):
+            raise DeployError("Release integrity check failed: file set mismatch.")
+        for rel, path in actual_paths.items():
+            item = expected_files.get(rel)
+            if not isinstance(item, dict):
+                raise DeployError("Release integrity check failed: invalid file record.")
+            try:
+                expected_size = int(item.get("size", -1))
+            except (TypeError, ValueError) as exc:
+                raise DeployError(f"Release integrity check failed: invalid size record for {rel}.") from exc
+            if expected_size != path.stat().st_size:
+                raise DeployError(f"Release integrity check failed: size mismatch for {rel}.")
+            if not hmac_compare_digest(str(item.get("sha256") or ""), self._file_sha256(path)):
+                raise DeployError(f"Release integrity check failed: checksum mismatch for {rel}.")
+        return actual_tree
 
     def _validate_tree(self, root: Path) -> tuple[str, ...]:
         checks: list[str] = []
@@ -356,10 +447,14 @@ class DeploymentManager:
         checks.append(f"files:{file_count}")
         checks.append(f"bytes:{total_bytes}")
         checks.append("python/json/toml:ok")
-        checks.append(f"sha256:{self._tree_digest(root)}")
+        tree_digest = self._write_manifest(root)
+        checks.append(f"sha256:{tree_digest}")
+        checks.append("integrity-manifest:ok")
         return tuple(checks)
 
     def _activate_release(self, project: str, release: str) -> str | None:
+        release_path = self.releases_dir(project) / release
+        self._verify_manifest(release_path)
         project_dir = self.project_dir(project)
         link = self.current_link(project)
         previous = self.current_release_name(project)
@@ -453,6 +548,7 @@ class DeploymentManager:
             final = releases / release
             try:
                 await asyncio.to_thread(self._clone_release, current, staging)
+                (staging / MANIFEST_NAME).unlink(missing_ok=True)
                 target = staging.joinpath(*rel.parts)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 previous_mode: int | None = None

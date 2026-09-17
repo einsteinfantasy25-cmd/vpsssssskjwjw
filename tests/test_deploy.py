@@ -205,3 +205,70 @@ async def test_concurrent_updates_do_not_corrupt_project(tmp_path: Path):
     assert current is not None
     assert current.joinpath("main.py").read_text() in {"VALUE = 1\n", "VALUE = 2\n"}
     assert len(mgr.release_names("mybot")) == 3
+
+@pytest.mark.asyncio
+async def test_release_integrity_manifest_blocks_tampered_rollback(tmp_path: Path):
+    mgr = manager(tmp_path)
+    first_zip = tmp_path / "first.zip"
+    second_zip = tmp_path / "second.zip"
+    make_zip(first_zip, {"main.py": "VALUE = 1\n"})
+    make_zip(second_zip, {"main.py": "VALUE = 2\n"})
+    first = await mgr.deploy_zip("securebot", first_zip)
+    second = await mgr.deploy_zip("securebot", second_zip)
+    assert mgr.current_release_name("securebot") == second.release
+
+    old_release = mgr.releases_dir("securebot") / first.release
+    old_release.joinpath("main.py").write_text("TAMPERED = True\n")
+    with pytest.raises(DeployError, match="integrity"):
+        await mgr.rollback("securebot", first.release)
+    assert mgr.current_release_name("securebot") == second.release
+
+
+def test_release_manifest_is_hidden_from_normal_file_listing(tmp_path: Path):
+    import asyncio
+
+    mgr = manager(tmp_path)
+    archive = tmp_path / "app-manifest.zip"
+    make_zip(archive, {"main.py": "VALUE = 1\n"})
+    asyncio.run(mgr.deploy_zip("manifestbot", archive))
+    assert ".titanbox-release.json" not in mgr.list_files("manifestbot")
+
+@pytest.mark.asyncio
+async def test_releases_do_not_share_hardlinked_inodes(tmp_path: Path):
+    mgr = manager(tmp_path)
+    archive = tmp_path / "hardlink-base.zip"
+    make_zip(archive, {"main.py": "VALUE = 1\n", "config.txt": "stable\n"})
+    first = await mgr.deploy_zip("isobot", archive)
+    replacement = tmp_path / "main.py"
+    replacement.write_text("VALUE = 2\n")
+    second = await mgr.put_file("isobot", "main.py", replacement)
+
+    first_config = mgr.releases_dir("isobot") / first.release / "config.txt"
+    second_config = mgr.releases_dir("isobot") / second.release / "config.txt"
+    assert first_config.stat().st_ino != second_config.stat().st_ino
+    second_config.write_text("changed in current\n")
+    assert first_config.read_text() == "stable\n"
+
+
+def test_rejects_invisible_unicode_in_paths_and_filenames(tmp_path: Path):
+    mgr = manager(tmp_path)
+    with pytest.raises(DeployError, match="invisible"):
+        mgr.validate_relative_path("safe/evil\u202etxt.py")
+    with pytest.raises(DeployError, match="invisible"):
+        mgr.safe_filename("evil\u202etxt.py")
+
+
+@pytest.mark.asyncio
+async def test_zip_duplicate_normalized_path_is_rejected(tmp_path: Path):
+    mgr = manager(tmp_path)
+    archive = tmp_path / "duplicate.zip"
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("main.py", "VALUE = 1\n")
+            # A ZIP may legally contain duplicate entries. Deployment must not depend on which
+            # duplicate extractor ordering happens to win.
+            zf.writestr("main.py", "VALUE = 2\n")
+    with pytest.raises(DeployError, match="duplicate normalized path"):
+        await mgr.deploy_zip("duplicate", archive)
