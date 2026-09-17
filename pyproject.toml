@@ -1,6 +1,6 @@
 [project]
 name = "titanbox"
-version = "0.2.0"
+version = "0.3.0"
 description = "Ultra-light PaaS runtime and multi-bot hub for Telegram workloads"
 requires-python = ">=3.12"
 

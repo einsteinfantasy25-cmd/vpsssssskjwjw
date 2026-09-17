@@ -12,6 +12,7 @@ class FakeBot:
     def __init__(self, source: Path | None = None):
         self.source = source
         self.messages: list[str] = []
+        self.name = "deploy-admin"
 
     async def send_message(self, chat_id, text, **extra):
         self.messages.append(text)
@@ -24,6 +25,12 @@ class FakeBot:
         destination.write_bytes(data)
         return len(data)
 
+    async def get_me(self):
+        return {"id": 1, "username": "DeployAdminTestBot"}
+
+    async def get_webhook_info(self):
+        return {"url": "https://example.onrender.com/telegram/deploy-admin", "pending_update_count": 0}
+
 
 def make_settings(monkeypatch, root: Path) -> Settings:
     monkeypatch.setenv("BOTS_JSON", "[]")
@@ -33,13 +40,15 @@ def make_settings(monkeypatch, root: Path) -> Settings:
 
 
 @pytest.mark.asyncio
-async def test_unauthorized_user_is_ignored(monkeypatch, tmp_path: Path):
+async def test_unauthorized_user_gets_clear_denial(monkeypatch, tmp_path: Path):
     plugin = DeployAdminPlugin()
     plugin.bind_services(PluginServices(settings=make_settings(monkeypatch, tmp_path)))
     bot = FakeBot()
     update = {"message": {"from": {"id": 999}, "chat": {"id": 1}, "text": "/help"}}
     await plugin.handle(update, bot)
-    assert bot.messages == []
+    assert bot.messages
+    assert "999" in bot.messages[-1]
+    assert "غير مصرح" in bot.messages[-1]
 
 
 @pytest.mark.asyncio
@@ -89,3 +98,28 @@ async def test_smart_single_file_update(monkeypatch, tmp_path: Path):
     assert current is not None
     assert current.joinpath("main.py").read_text() == "VALUE = 9\n"
     assert any("تم تحديث main.py" in text for text in bot.messages)
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_start_reveals_own_numeric_id(monkeypatch, tmp_path: Path):
+    plugin = DeployAdminPlugin()
+    plugin.bind_services(PluginServices(settings=make_settings(monkeypatch, tmp_path)))
+    bot = FakeBot()
+    await plugin.handle(
+        {"message": {"from": {"id": 777001}, "chat": {"id": 1}, "text": "/start"}},
+        bot,
+    )
+    assert any("777001" in text and "DEPLOY_ADMIN_TELEGRAM_IDS" in text for text in bot.messages)
+
+
+@pytest.mark.asyncio
+async def test_admin_diag_reports_webhook(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://example.onrender.com")
+    plugin = DeployAdminPlugin()
+    plugin.bind_services(PluginServices(settings=make_settings(monkeypatch, tmp_path)))
+    bot = FakeBot()
+    await plugin.handle(
+        {"message": {"from": {"id": 123}, "chat": {"id": 1}, "text": "/diag"}},
+        bot,
+    )
+    assert any("DeployAdminTestBot" in text and "Pending updates: 0" in text for text in bot.messages)

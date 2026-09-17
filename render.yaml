@@ -4,7 +4,7 @@ services:
     runtime: docker
     plan: free
     healthCheckPath: /healthz
-    autoDeployTrigger: checksPass
+    autoDeployTrigger: commit
     envVars:
       - key: LOG_LEVEL
         value: INFO
@@ -13,14 +13,22 @@ services:
       - key: ENABLE_RUNNER
         value: "false"
       - key: AUTO_REGISTER_WEBHOOKS
-        value: "false"
+        value: "true"
       - key: BOTS_JSON
+        value: '[{"name":"deploy-admin","token_env":"DEPLOY_BOT_TOKEN","plugin":"titanbox.plugins.deploy_admin:DeployAdminPlugin"}]'
+      - key: DEPLOY_BOT_TOKEN
         sync: false
-      - key: PUBLIC_BASE_URL
-        sync: false
+      - key: WEBHOOK_SECRET_KEY
+        generateValue: true
       - key: ADMIN_TOKEN
         generateValue: true
       - key: DEPLOY_ROOT
         value: /workspace/titanbox-data
-      - key: DEPLOY_ADMIN_TELEGRAM_IDS
-        sync: false
+      - key: DEPLOY_STORAGE_PERSISTENT
+        value: "false"
+      - key: TELEGRAM_MAX_CONNECTIONS
+        value: "5"
+      - key: WEBHOOK_MAX_INFLIGHT
+        value: "16"
+      - key: MEMORY_PRESSURE_LIMIT_PCT
+        value: "88"

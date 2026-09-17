@@ -1,20 +1,53 @@
-# Deploy on Render
+# Deploy TitanBox v0.3 on Render
 
-Render Free is useful for testing/hobby deployments, but it is not a real persistent VPS.
+## Recommended path
 
-1. Push this folder to a GitHub repository.
-2. Render -> New -> Blueprint, or create a Docker Web Service and connect the repo.
-3. Select the Free instance if desired.
-4. Add secrets from `.env.example` in the dashboard. Never commit real tokens.
-5. Set `PUBLIC_BASE_URL` to your `https://...onrender.com` URL.
-6. Set `AUTO_REGISTER_WEBHOOKS=true` once the URL is correct, or call the protected admin registration endpoint.
-7. Keep `ENABLE_TERMINAL=false` normally.
+1. Upload the **complete repository root** to GitHub.
+2. Render → New → Blueprint.
+3. Select the repository.
+4. Enter only the prompted secret `DEPLOY_BOT_TOKEN` from BotFather.
+5. Deploy.
 
-### Render-specific reality
+`render.yaml` already configures the Deploy Admin descriptor, `AUTO_REGISTER_WEBHOOKS=true`, resource limits and safe generated secrets.
 
-- A Free web service spins down after 15 minutes without inbound traffic and wakes on the next request.
-- The free filesystem is ephemeral; runtime edits disappear after spin-down/restart/redeploy.
-- Free services do not provide Render shell/SSH access. TitanBox's optional browser terminal is application-level access to the container, not a real VPS SSH service.
-- Free services cannot attach persistent disks.
+## Public URL
 
-For Telegram, webhooks are preferable to long polling on a sleeping web service because an incoming webhook can wake it.
+Do not create a fake placeholder URL. TitanBox v0.3 resolves the Render URL from the platform-provided `RENDER_EXTERNAL_URL` / `RENDER_EXTERNAL_HOSTNAME` variables.
+
+## Admin authorization bootstrap
+
+The first `/start` from an unauthorized Telegram account returns that account's numeric Telegram ID and performs no admin action. Add the returned value in Render:
+
+```text
+DEPLOY_ADMIN_TELEGRAM_IDS=123456789
+```
+
+Save/redeploy, then use `/start` and `/diag` again.
+
+## Diagnostics
+
+Browser:
+
+```text
+/
+/setup
+/status
+/healthz
+/readyz
+```
+
+Telegram admin:
+
+```text
+/whoami
+/diag
+```
+
+## Render Free reality
+
+- Free web services can spin down after idle periods.
+- Runtime filesystem changes are ephemeral and can disappear on restart/redeploy/spin-down.
+- Free web services cannot attach a persistent disk.
+- The browser terminal is an optional shell inside the application container, not a real VPS SSH service.
+
+Use Git/external databases/object storage for anything that must persist.

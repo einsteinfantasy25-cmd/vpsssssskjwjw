@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       bash ca-certificates curl git gettext-base nano nginx-light procps tini tmux \
     && rm -rf /var/lib/apt/lists/*
 
-# Optional browser terminal. Download a tiny static ttyd binary and verify it against upstream checksums.
+# Optional browser terminal. ttyd is always present but remains OFF unless ENABLE_TERMINAL=true.
 RUN set -eux; \
     case "${TARGETARCH:-amd64}" in \
       amd64) TTYD_ARCH=x86_64 ;; \
@@ -40,12 +40,21 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-COPY src /app/src
-COPY config /app/config
-COPY examples /app/examples
-COPY scripts /app/scripts
-COPY nginx /app/nginx
-RUN chmod +x /app/scripts/*.sh && chown -R app:app /app /workspace
+# One COPY avoids opaque Docker checksum errors when somebody accidentally uploads an incomplete repo.
+# The following RUN prints a human-readable list of missing mandatory paths instead.
+COPY --chown=app:app . /app
+RUN set -eu; \
+    missing=""; \
+    for p in src/titanbox/main.py src/titanbox/settings.py scripts/entrypoint.sh config/apps.toml nginx/nginx.conf.template; do \
+      if [ ! -e "/app/$p" ]; then missing="$missing $p"; fi; \
+    done; \
+    if [ -n "$missing" ]; then \
+      echo "FATAL: TitanBox repository is incomplete. Missing:$missing" >&2; \
+      echo "Upload the FULL project root to GitHub, not only the top-level files." >&2; \
+      exit 64; \
+    fi; \
+    chmod +x /app/scripts/*.sh; \
+    chown -R app:app /app /workspace
 
 USER app
 EXPOSE 10000

@@ -1,19 +1,38 @@
-# Troubleshooting
+# TitanBox v0.3 Troubleshooting
 
-## Render first request is slow
-Free Render services spin down after inactivity. The first request may wait for a cold start. This is platform behavior, not a memory leak.
+## `/start` says I am not authorized
+This is expected on first boot. The message includes your numeric Telegram ID. Put it into:
 
-## `free -h` shows enormous RAM
-Do not use host totals to infer your container allocation. Check `/healthz` or `/metrics`; TitanBox reads cgroup memory limits directly.
+```text
+DEPLOY_ADMIN_TELEGRAM_IDS=<your number>
+```
 
-## Changes made in browser terminal vanished
-Expected on ephemeral platforms such as Render Free. Commit code to Git and store data externally.
+in Render Environment and redeploy.
 
-## Webhook returns 403
-Verify the bot's webhook `secret_token` matches the environment variable named by `secret_env` in `BOTS_JSON`.
+## `/start` does not arrive at all
+Open `/status` and `/readyz`. Then use Render logs. Typical states:
+
+- `missing environment secret DEPLOY_BOT_TOKEN` → BotFather token is missing.
+- webhook registration error → check token/network and `/diag` after authorization.
+- bot loaded but not ready → compare expected and actual webhook.
+
+## I don't know what the Render URL is for
+Open the root URL. v0.3 renders a human-readable TitanBox dashboard. `/setup` gives next steps.
+
+## Docker says the repository is incomplete
+v0.3 uses one build-context COPY and prints the missing mandatory paths. Your GitHub root must include `src/`, `config/`, `scripts/`, `nginx/`, `Dockerfile` and `render.yaml`.
+
+## `free -h` shows huge RAM
+Host totals do not equal your container limit. TitanBox `/healthz` and `/metrics` use cgroup-aware readings.
+
+## Uploaded files disappeared
+Expected on Render Free. Its local filesystem is ephemeral. Keep durable code in Git and durable files/data outside the container.
+
+## `/deploy` says Restarted: false
+The uploaded project is versioned/validated but not connected to Legacy Runner. Uploading arbitrary code does not automatically execute it. Configure Runner intentionally or adapt the bot to Ultra Mode.
 
 ## AppRunner circuit opened
-The legacy app crashed too many times inside its configured window. Fix the underlying error, then call the admin start/restart endpoint.
+The child application crashed too many times inside its restart window. Fix the underlying error, then start/restart it again.
 
 ## Out of memory
-Disable terminal, reduce legacy processes, move heavy processing off-box, shrink caches, and inspect cgroup memory. Do not increase Uvicorn workers on a 512 MB container unless measurements prove it is safe.
+Disable terminal, avoid duplicated bot processes, reduce concurrency/caches, stream files and move heavy AI/PDF/audio work off-box.

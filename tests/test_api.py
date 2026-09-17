@@ -15,6 +15,9 @@ def test_health_and_metrics(monkeypatch):
     with TestClient(main.app) as client:
         assert client.get("/healthz").status_code == 200
         assert client.get("/readyz").json()["ok"] is True
+        assert "TitanBox" in client.get("/").text
+        assert client.get("/setup").status_code == 200
+        assert client.get("/status").json()["version"] == "0.3.0"
         text = client.get("/metrics").text
         assert "titanbox_up 1" in text
 

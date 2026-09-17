@@ -15,7 +15,11 @@ HELP_TEXT = """TitanBox Deploy Admin 🚀
 
 هذا البوت مخصص للإدارة فقط.
 
-الأوامر:
+أوامر التشخيص:
+/whoami — يعرض Telegram numeric ID وحالة الصلاحية
+/diag — يفحص Bot token + Webhook + Pending updates
+
+إدارة المشاريع:
 /projects — عرض المشاريع
 /use NAME — اختيار مشروع افتراضي
 /status [NAME] — حالة المشروع
@@ -46,6 +50,9 @@ class DeployAdminPlugin:
         self.active_project: dict[int, str] = {}
         self._op_slots = asyncio.Semaphore(1)
         self._tasks: set[asyncio.Task[None]] = set()
+        self.public_base_url: str | None = None
+        self.platform = "generic"
+        self.storage_persistent = False
 
     def bind_services(self, services: "PluginServices") -> None:
         settings = services.settings
@@ -60,6 +67,9 @@ class DeployAdminPlugin:
         self.manager = DeploymentManager(settings.deploy_root, limits, runner=services.runner)
         self.admin_ids = settings.deploy_admin_ids()
         self.max_upload_bytes = settings.deploy_max_upload_bytes
+        self.public_base_url = settings.public_base_url
+        self.platform = settings.platform
+        self.storage_persistent = settings.deploy_storage_persistent
         self._op_slots = asyncio.Semaphore(settings.deploy_max_concurrent_ops)
 
     def _spawn_operation(self, coroutine: Any, chat_id: int | str, bot: "BotContext") -> None:
@@ -142,6 +152,48 @@ class DeployAdminPlugin:
         if chunk:
             await bot.send_message(chat_id, chunk)
 
+    def _persistence_warning(self) -> str:
+        if self.platform == "render" and not self.storage_persistent:
+            return "\n⚠️ Render Free storage is ephemeral: local uploaded files can disappear after restart/redeploy/spin-down."
+        return ""
+
+    async def _whoami(self, user_id: int, chat_id: int | str, bot: "BotContext") -> None:
+        authorized = user_id in self.admin_ids
+        status = "✅ مصرح" if authorized else "⛔ غير مصرح بعد"
+        text = (
+            f"Telegram numeric ID: `{user_id}`\n"
+            f"Status: {status}\n\n"
+        )
+        if not authorized:
+            text += (
+                "حتى تفعل الإدارة: Render → Environment → "
+                f"DEPLOY_ADMIN_TELEGRAM_IDS={user_id} ثم Save/Redeploy.\n"
+                "ما تم تنفيذ أي صلاحية إدارية."
+            )
+        await bot.send_message(chat_id, text, parse_mode="Markdown")
+
+    async def _diag(self, user_id: int, chat_id: int | str, bot: "BotContext") -> None:
+        me = await bot.get_me()
+        info = await bot.get_webhook_info()
+        username = me.get("username") or "-"
+        url = info.get("url") or "-"
+        pending = info.get("pending_update_count", 0)
+        last_error = info.get("last_error_message") or "-"
+        expected = f"{self.public_base_url}/telegram/{bot.name}" if self.public_base_url else "غير مكتشف"
+        match = "✅" if url == expected else "⚠️"
+        await bot.send_message(
+            chat_id,
+            "🧪 TitanBox diagnostics\n"
+            f"Admin ID: {user_id}\n"
+            f"Bot: @{username}\n"
+            f"Public base URL: {self.public_base_url or '-'}\n"
+            f"Expected webhook: {expected}\n"
+            f"Telegram webhook: {url} {match}\n"
+            f"Pending updates: {pending}\n"
+            f"Last Telegram error: {last_error}"
+            f"{self._persistence_warning()}",
+        )
+
     async def _handle_command(
         self,
         user_id: int,
@@ -156,7 +208,15 @@ class DeployAdminPlugin:
         command = parts[0]
 
         if command in {"/start", "/help"}:
-            await bot.send_message(chat_id, HELP_TEXT)
+            await bot.send_message(chat_id, HELP_TEXT + self._persistence_warning())
+            return True
+
+        if command == "/whoami":
+            await self._whoami(user_id, chat_id, bot)
+            return True
+
+        if command == "/diag":
+            await self._diag(user_id, chat_id, bot)
             return True
 
         if command == "/projects":
@@ -286,12 +346,16 @@ class DeployAdminPlugin:
                 result = await self.manager.deploy_zip(project, temp)
             finally:
                 temp.unlink(missing_ok=True)
+            run_note = (
+                "✅ التطبيق أُعيد تشغيله واستقر." if result.restarted
+                else "ℹ️ تم حفظ وفحص النسخة، لكنها غير مربوطة بالـRunner؛ رفع ZIP وحده لا يشغّل برنامجاً عشوائياً تلقائياً."
+            )
             await bot.send_message(
                 chat_id,
-                "✅ Deployment ناجح\n"
+                "✅ Deployment files accepted\n"
                 f"Project: {result.project}\nRelease: {result.release}\n"
                 f"Previous: {result.previous_release or '-'}\nRestarted: {result.restarted}\n"
-                f"Checks: {', '.join(result.validation)}",
+                f"Checks: {', '.join(result.validation)}\n{run_note}" + self._persistence_warning(),
             )
             return
 
@@ -306,11 +370,12 @@ class DeployAdminPlugin:
                 result = await self.manager.put_file(project, target, temp)
             finally:
                 temp.unlink(missing_ok=True)
+            run_note = "" if result.restarted else "\nℹ️ المشروع غير مربوط بالـRunner، لذلك تم تحديث الملفات فقط."
             await bot.send_message(
                 chat_id,
                 "✅ تحديث الملف نجح\n"
                 f"Project: {project}\nPath: {target}\nRelease: {result.release}\n"
-                f"Previous: {result.previous_release or '-'}\nRestarted: {result.restarted}",
+                f"Previous: {result.previous_release or '-'}\nRestarted: {result.restarted}" + run_note + self._persistence_warning(),
             )
             return
 
@@ -329,7 +394,7 @@ class DeployAdminPlugin:
                 temp.unlink(missing_ok=True)
             await bot.send_message(
                 chat_id,
-                f"✅ تم تحديث {target}\nRelease: {result.release}\nPrevious: {result.previous_release or '-'}\nRestarted: {result.restarted}",
+                f"✅ تم تحديث {target}\nRelease: {result.release}\nPrevious: {result.previous_release or '-'}\nRestarted: {result.restarted}" + self._persistence_warning(),
             )
             return
 
@@ -351,12 +416,20 @@ class DeployAdminPlugin:
         user_id, chat_id, message = self._actor(update)
         if user_id is None or chat_id is None or message is None:
             return
+        text = str(message.get("text") or "").strip()
         if user_id not in self.admin_ids:
             log.warning("rejected deployment bot access user_id=%s", user_id)
+            command = self._command_parts(text)[0] if text.startswith("/") and self._command_parts(text) else ""
+            if command in {"/start", "/whoami"}:
+                await self._whoami(user_id, chat_id, bot)
+            else:
+                await bot.send_message(
+                    chat_id,
+                    f"⛔ هذا الحساب غير مصرح للإدارة.\nTelegram ID مالك: {user_id}\nأرسل /whoami للتعليمات.",
+                )
             return
 
         try:
-            text = str(message.get("text") or "").strip()
             if text.startswith("/") and await self._handle_command(user_id, chat_id, text, bot):
                 return
             if isinstance(message.get("document"), dict):

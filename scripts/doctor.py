@@ -28,7 +28,6 @@ def check_write(path: Path) -> dict[str, object]:
 def main() -> int:
     report: dict[str, object] = {
         "python": sys.version.split()[0],
-        "platform_hint": "render" if os.getenv("RENDER") else "railway" if os.getenv("RAILWAY_ENVIRONMENT") else "generic",
         "system": snapshot(),
         "checks": {},
     }
@@ -37,7 +36,23 @@ def main() -> int:
     try:
         settings = Settings.from_env()
         settings.validate()
-        checks["settings"] = {"ok": True, "bot_descriptors": len(settings.bot_descriptors())}
+        descriptors = settings.bot_descriptors()
+        missing_token_envs: list[str] = []
+        for item in descriptors:
+            if not isinstance(item, dict):
+                continue
+            token_env = str(item.get("token_env", "")).strip()
+            if token_env and not os.getenv(token_env, "").strip():
+                missing_token_envs.append(token_env)
+        checks["settings"] = {
+            "ok": not missing_token_envs,
+            "platform": settings.platform,
+            "public_base_url": settings.public_base_url,
+            "bot_descriptors": len(descriptors),
+            "deploy_admin_ids": sorted(settings.deploy_admin_ids()),
+            "missing_token_envs": missing_token_envs,
+            "warnings": settings.setup_warnings(),
+        }
         checks["deploy_root_writable"] = check_write(settings.deploy_root)
     except Exception as exc:
         checks["settings"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
